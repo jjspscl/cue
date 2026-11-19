@@ -1475,9 +1475,12 @@
     const actions = makeEl('div', 'sess-actions');
     const newBtn = makeEl('button', 'sess-btn primary', 'New session');
     newBtn.addEventListener('click', async () => {
+      if (busy) { showToast('Wait for the current answer to finish', 2500); return; }
       await cue.sessionNew();
-      showToast('Started a new session', 2500);
-      renderSessionList();
+      clearMessages();
+      responseCount = 0;
+      sessionsScrim.classList.add('hidden');
+      showToast('New session started', 2500);
     });
     actions.appendChild(newBtn);
     sessionsBody.appendChild(actions);

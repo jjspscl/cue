@@ -1048,10 +1048,12 @@ async function setCapturing(active) {
 // -------- feature runner --------
 // Saves a finished question, its answer, and the screenshot Cue sent to the current session.
 // Failures are logged and never break the answer the user is already reading.
-function saveSessionTurn({ mode, question, answer, imageDataUrl }) {
+function saveSessionTurn(askedSessionId, { mode, question, answer, imageDataUrl }) {
   if (!sessionStore || !answer.trim()) return;
   try {
-    currentSessionId = sessionStore.appendTurn(currentSessionId, { mode, question, answer, imageDataUrl });
+    const id = sessionStore.appendTurn(askedSessionId, { mode, question, answer, imageDataUrl });
+    // Only move "current" to the saved session if the user hasn't started a new one meanwhile.
+    if (currentSessionId === askedSessionId) currentSessionId = id;
   } catch (e) {
     recordEvent({ level: 'error', event: 'session_save_failed', msg: e && e.message ? e.message : String(e), frame: 'saveSessionTurn', context: { mode } });
   }
@@ -1064,6 +1066,7 @@ async function runFeature(mode, userText) {
   state.busy = true;
   let streamSettled = false; // drop stray tokens from a stream we've already abandoned
   let answer = ''; // full streamed reply, saved to the session once it completes
+  const sessionAtAsk = currentSessionId; // the session this question belongs to, even if the user starts a new one meanwhile
   try {
     const settings = store.getSettings();
     const llm = createLLM(settings);
@@ -1186,7 +1189,7 @@ async function runFeature(mode, userText) {
     // Streams settle after their headers, so the charge is reconciled from
     // GET /wallet shortly after the answer — one request per answer, debounced.
     if (settings.provider === publik.PUBLIK_PROVIDER) publikScheduleWalletRefresh();
-    saveSessionTurn({ mode, question: userText || userBubble || '', answer, imageDataUrl });
+    saveSessionTurn(sessionAtAsk, { mode, question: userText || userBubble || '', answer, imageDataUrl });
   } catch (e) {
     recordEvent({ level: 'error', event: e && e.emptyAnswer ? 'llm_empty_answer' : 'llm_failed', msg: e && e.message ? e.message : String(e), frame: 'runFeature', context: { mode, provider: store.getSettings().provider, finishReason: (e && e.finishReason) || null, stopKind: (e && e.stopKind) || null, retryFailed: (e && e.retryFailed) || null } });
     // A bad own key: plain words, "Switch to publik" first, "Fix my key"
