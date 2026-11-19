@@ -6,14 +6,19 @@
   const isWindows = cue.platform === 'win32';
   const isMac = cue.platform === 'darwin';
 
+  // Exiting must work before settings or provider setup has completed.
+  const quitButton = $('#quit-btn');
+  quitButton.addEventListener('click', () => cue.quit());
+  quitButton.title = isMac ? 'Quit cue (⌘⇧X)' : 'Quit cue (Ctrl+Shift+X)';
+
   // ---- paint icons -------------------------------------------------------
-  $('#logo-btn').innerHTML = icon('logo', { size: 18 });
+  $('#logo-btn').innerHTML = icon('badge-question-mark', { size: 16 });
+  $('#tb-settings-btn').innerHTML = icon('settings', { size: 16 });
   $('.tb-hide .chev').innerHTML = icon('chevron-down', { size: 14 });
-  $('#stop-btn').innerHTML = icon('stop-square', { size: 15 });
+  $('#opacity-btn .ic').innerHTML = icon('eclipse', { size: 14 });
   $('#quit-btn').innerHTML = icon('x', { size: 14 });
-  document.querySelector('.act[data-mode="assist"] .ic').innerHTML = icon('sparkles', { size: 16 });
+  document.querySelector('.act[data-mode="assist"] .ic').innerHTML = icon('monitor', { size: 16 });
   document.querySelector('.act[data-mode="say"] .ic').innerHTML = icon('wand-sparkles', { size: 16 });
-  document.querySelector('.act[data-mode="followup"] .ic').innerHTML = icon('message-circle', { size: 16 });
   document.querySelector('.act[data-mode="recap"] .ic').innerHTML = icon('refresh-cw', { size: 16 });
   $('#smart-toggle .ic').innerHTML = icon('zap', { size: 14 });
   $('#more-btn').innerHTML = icon('more-horizontal', { size: 18 });
@@ -21,8 +26,26 @@
   const clearIC = document.querySelector('#clear-transcript-btn .ic');
   if (clearIC) clearIC.innerHTML = icon('trash-2', { size: 15 });
 
+  function setSessionButton(active) {
+    const btn = $('#stop-btn');
+    const ic = btn.querySelector('.ic');
+    const label = btn.querySelector('.tb-stop-label');
+    btn.classList.toggle('active', active);
+    if (ic) ic.innerHTML = active
+      ? icon('square', { size: 14 })
+      : icon('play', { size: 14, filled: false });
+    if (label) label.textContent = active ? 'End session' : 'Start session';
+    const title = active ? 'End session' : 'Start session';
+    btn.title = title;
+    btn.setAttribute('aria-label', title);
+  }
+  setSessionButton(false);
+
   // ---- state -------------------------------------------------------------
   let settings = null;
+  // Redacted view of the publik API state (never the key), from main via
+  // cue.publikState() at boot and the publik:state push thereafter.
+  let publikState = null;
   let whisperOverview = null;
   let busy = false;
   let aiEl = null;       // current streaming <div class="ai-text">
@@ -77,8 +100,29 @@
     messages.appendChild(aiEl);
   }
 
+  // "Thinking…" while a reasoning model thinks and no answer text has come
+  // yet. Only this placeholder shows, never the reasoning itself. The first
+  // answer token replaces it (appendToken), and so does the final message
+  // (finalizeAi re-renders the bubble from its text).
+  function showThinking() {
+    if (!aiEl || aiEl.dataset.raw) return;
+    if (aiEl.querySelector('.ai-thinking')) return;
+    const el = document.createElement('span');
+    el.className = 'ai-thinking';
+    el.textContent = 'Thinking…';
+    if (caretEl && caretEl.parentNode === aiEl) aiEl.insertBefore(el, caretEl);
+    else aiEl.appendChild(el);
+    scrollAnswerToEnd();
+  }
+
+  function clearThinking() {
+    const el = aiEl && aiEl.querySelector('.ai-thinking');
+    if (el) el.remove();
+  }
+
   function appendToken(t) {
     if (!aiEl) startAi(false);
+    clearThinking();
     aiEl.dataset.raw += t;
     const span = document.createElement('span');
     span.className = 'w';
@@ -89,6 +133,7 @@
     } else {
       aiEl.appendChild(span);
     }
+    scrollAnswerToEnd();
   }
 
   function finalizeAi() {
@@ -96,16 +141,64 @@
     const raw = aiEl.dataset.raw || '';
     aiEl.innerHTML = renderMarkdown(raw);
     aiEl = null; caretEl = null;
+    scrollAnswerToEnd(); // the final text (or the honest message) can be taller
   }
+
+  // ---- follow the answer ---------------------------------------------------
+  // #messages is at most 50vh tall. A long answer, or the honest message that
+  // takes the place of an empty one, grows past its bottom edge (0.2.11 smoke
+  // test: the end stayed hidden). While an answer comes in, keep its end in
+  // view, but only while the view is at the end: a scroll that leaves the
+  // last FOLLOW_SLACK_PX by any means (wheel, scrollbar drag, PageUp, a
+  // trackpad) stops following, and a scroll back to the end starts it again.
+  // cue's own scrolls are told apart by the position they set. llm:start
+  // turns following on.
+  let followAnswer = false;
+  let followFrame = 0;
+  let ownScrollTop = -1;
+  const FOLLOW_SLACK_PX = 40;
+  function atAnswerEnd() {
+    return messages.scrollHeight - messages.scrollTop - messages.clientHeight <= FOLLOW_SLACK_PX;
+  }
+  function scrollMessagesToEnd() {
+    const end = Math.max(0, messages.scrollHeight - messages.clientHeight);
+    ownScrollTop = end;
+    messages.scrollTop = end;
+    ownScrollTop = messages.scrollTop; // what the browser kept (it can round)
+  }
+  function scrollAnswerToEnd() {
+    if (!followAnswer || followFrame) return;
+    // One scroll per frame, after the DOM has the new text.
+    followFrame = requestAnimationFrame(() => {
+      followFrame = 0;
+      if (followAnswer) scrollMessagesToEnd();
+    });
+  }
+  messages.addEventListener('scroll', () => {
+    if (Math.abs(messages.scrollTop - ownScrollTop) <= 2) return; // cue's own scroll
+    ownScrollTop = -1;
+    followAnswer = atAnswerEnd();
+  }, { passive: true });
 
   let busyFailsafe = null;
   function setBusy(v) {
     busy = v;
     $('#send-btn').classList.toggle('busy', v);
     clearTimeout(busyFailsafe);
-    // Failsafe: main has a 25s stream watchdog that always sends llm:done/llm:error, but if a
-    // terminal event is ever lost the whole UI stays frozen — self-clear after a generous window.
-    if (v) busyFailsafe = setTimeout(() => { busy = false; $('#send-btn').classList.toggle('busy', false); }, 40000);
+    if (v) armBusyFailsafe();
+  }
+
+  // Failsafe: main has a 25s stream watchdog that always sends llm:done/llm:error, but if a
+  // terminal event is ever lost the whole UI stays frozen — self-clear after a generous window.
+  // The window counts from the last sign of life (thinking or answer text), so a long answer
+  // that is still streaming is never cleared under it.
+  function armBusyFailsafe() {
+    clearTimeout(busyFailsafe);
+    busyFailsafe = setTimeout(() => { busy = false; $('#send-btn').classList.toggle('busy', false); }, 40000);
+  }
+
+  function onAnswerActivity() {
+    if (busy) armBusyFailsafe();
   }
 
   // ---- transcript helpers ------------------------------------------------
@@ -132,7 +225,7 @@
     if (!el) {
       el = document.createElement('div');
       el.id = 'toast';
-      document.getElementById('app').appendChild(el);
+      document.getElementById('panel-wrap').appendChild(el);
     }
     // Clear any pending timers to prevent overlap
     clearTimeout(toastTimer);
@@ -275,30 +368,6 @@
     while (questionHistory.length > MAX_QUESTION_HISTORY) {
       questionHistory.shift();
     }
-    
-    updateHistoryBadge(); // FIX #14: Update badge when history changes
-  }
-  
-  // FIX #14: History button badge showing count
-  function updateHistoryBadge() {
-    const historyBtn = document.getElementById('history-btn');
-    if (!historyBtn) return;
-    
-    // Remove existing badge if any
-    let badge = historyBtn.querySelector('.history-badge');
-    
-    const count = questionHistory.length;
-    if (count > 0) {
-      if (!badge) {
-        badge = document.createElement('span');
-        badge.className = 'history-badge';
-        historyBtn.appendChild(badge);
-      }
-      badge.textContent = count > 9 ? '9+' : count;
-      badge.style.display = '';
-    } else if (badge) {
-      badge.style.display = 'none';
-    }
   }
 
   // ---- Restore last question from history (Ctrl+Z) ----
@@ -311,7 +380,6 @@
       composer.classList.add('stt-filling');
       updateQuestionReadyState();
       syncPlaceholder();
-      updateHistoryBadge(); // Update badge after removing from history
       showToast('Question restored', 1500);
       return true;
     }
@@ -417,7 +485,6 @@
     clearInputInterim(); // FIX #5: Clear interim when clearing input
     syncPlaceholder();
     updateSendButtonState(); // FIX #9
-    updateHistoryBadge(); // FIX #14
     
     // FIX #10: Show undo hint when explicitly cleared
     if (showUndoHint && hadContent) {
@@ -516,7 +583,10 @@
       return;
     }
     if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey) { e.preventDefault(); send(); }
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); runMode('assist', ''); }
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      runMode(e.shiftKey ? 'assist' : 'say', '');
+    }
   });
   
   // FIX #13: Global keyboard shortcut for force-answer (Ctrl+Shift+A / Cmd+Shift+A)
@@ -551,13 +621,79 @@
   });
 
   // Hide / collapse
+  let reopenSidebarOnExpand = false;
   function toggleHide() {
-    const collapsed = $('#panel').classList.toggle('collapsed');
-    $('#hide-btn').classList.toggle('collapsed', collapsed);
-    $('#live-dot').style.display = collapsed ? 'none' : '';
+    const collapsed = $('#panel-wrap').classList.toggle('collapsed');
+    const btn = $('#hide-btn');
+    btn.classList.toggle('collapsed', collapsed);
+    const label = btn.querySelector('.tb-hide-label');
+    const text = collapsed ? 'Show' : 'Hide';
+    if (label) label.textContent = text;
+    btn.title = text;
+    btn.setAttribute('aria-label', text);
+    if (collapsed) {
+      reopenSidebarOnExpand = sidebarOpen;
+      if (sidebarOpen) hideSidebar();
+    } else if (reopenSidebarOnExpand) {
+      showSidebar();
+    }
   }
   $('#hide-btn').addEventListener('click', toggleHide);
   cue.on('hide:toggle', toggleHide);
+
+  const OPACITY_MIN = 0.2;
+  function clampOpacity(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 1;
+    return Math.min(1, Math.max(OPACITY_MIN, Math.round(n * 100) / 100));
+  }
+  function opacityToPercent(value) { return Math.round(clampOpacity(value) * 100); }
+  function persistOpacitySoon() {
+    clearTimeout(persistOpacitySoon.timer);
+    persistOpacitySoon.timer = setTimeout(() => {
+      if (!settings) return;
+      cue.settingsSet({ opacity: settings.opacity }).then((next) => { if (next) settings = next; }).catch(() => {});
+    }, 400);
+  }
+  function applyOpacity(value, persist) {
+    const opacity = clampOpacity(value);
+    const percent = opacityToPercent(opacity);
+    if (settings) settings.opacity = opacity;
+    document.documentElement.style.setProperty('--cue-opacity', String(opacity));
+    const tb = $('#tb-opacity-slider');
+    const tbVal = $('#tb-opacity-value');
+    const s = $('#s-opacity-slider');
+    const sVal = $('#s-opacity-value');
+    if (tb) tb.value = String(percent);
+    if (tbVal) tbVal.textContent = percent + '%';
+    if (s) s.value = String(percent);
+    if (sVal) sVal.textContent = percent + '%';
+    if (persist) persistOpacitySoon();
+  }
+  function toggleOpacityPopover(force) {
+    const pop = $('#opacity-popover');
+    const btn = $('#opacity-btn');
+    if (!pop || !btn) return;
+    const open = force != null ? force : pop.classList.contains('hidden');
+    pop.classList.toggle('hidden', !open);
+    btn.classList.toggle('on', open);
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    document.getElementById('app').classList.toggle('opacity-open', open);
+  }
+  $('#opacity-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleOpacityPopover();
+  });
+  document.addEventListener('click', (e) => {
+    const wrap = document.querySelector('.tb-opacity-wrap');
+    if (wrap && !wrap.contains(e.target)) toggleOpacityPopover(false);
+  });
+  ['tb-opacity-slider', 's-opacity-slider'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', () => applyOpacity(Number(el.value) / 100, true));
+    el.addEventListener('change', () => applyOpacity(Number(el.value) / 100, true));
+  });
 
   // Stop = start/stop listening. Kick off system-audio capture straight from the click so
   // the user-gesture is fresh for getDisplayMedia (loopback capture needs it).
@@ -578,31 +714,30 @@
   const clearTranscriptBtn = document.getElementById('clear-transcript-btn');
   if (clearTranscriptBtn) {
     clearTranscriptBtn.addEventListener('click', async () => {
-      // Save current input to history before clearing (for undo)
-      saveToQuestionHistory(input.value);
-      
       await cue.clearTranscript();
-      clearMessages();
       // Also clear the floating interim bar
       if (interimEl) { interimEl.textContent = ''; interimEl.classList.remove('show'); }
-      // FIX #1: Use ts-list instead of non-existent transcript-list
-      const list = document.getElementById('ts-list');
-      if (list) list.innerHTML = '<div class="ts-placeholder">Conversation history will appear here when listening.</div>';
       transcriptInterimEl = null;
-      clearTranscriptSidebar(); // clear the history sidebar too
-      hardClearSTTFill(); // clear the input box too
-      
-      const undoHint = isWindows ? 'Ctrl+Z to undo' : '⌘Z to undo';
-      showToast(`Transcript cleared · ${undoHint}`, 3500);
+      clearTranscriptSidebar();
+      // Only a question auto-filled from the transcript goes; anything the user typed stays.
+      if (inputFromSTT) hardClearSTTFill();
+      showToast('Transcript cleared.', 2500);
     });
   }
 
   // ---- capture: mic (renderer side) — uses AudioWorklet (modern, off-main-thread) ----
   let audioCtx = null, micStream = null, micWorklet = null;
+  // Generation counter: startMic() awaits getUserMedia, so a second call (or a
+  // stopMic()) can land mid-flight. Each start bumps the generation and bails
+  // if it is no longer current, otherwise two capture pipelines end up feeding
+  // the "you" channel at once — every slice of speech arrives twice, which the
+  // transcriber can't make sense of — and the orphaned one keeps the mic hot.
+  let micGen = 0;
   async function startMic() {
     if (micStream) return;
+    const gen = ++micGen;
     try {
-      micStream = await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
@@ -611,6 +746,12 @@
           sampleRate: 16000
         }
       });
+      if (gen !== micGen || micStream) {
+        // Superseded while we were waiting: another start won, or a stop came in.
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      micStream = stream;
       // getUserMedia can resolve with a stream that has no usable audio track
       // (e.g. a virtual/placeholder device, or a device that was unplugged
       // between permission grant and capture start). Fail loudly here instead
@@ -674,6 +815,7 @@
     }
   }
   function stopMic() {
+    micGen++; // invalidate any startMic() still waiting on getUserMedia
     if (micWorklet) {
       if (micWorklet._legacy) {
         micWorklet.proc.disconnect(); micWorklet.proc.onaudioprocess = null;
@@ -694,6 +836,14 @@
     // capture:state handler. getDisplayMedia is async, so `if (sysStream) return` alone loses the
     // race and can open a second loopback stream that is then orphaned.
     if (sysStream || sysStarting) return;
+    // macOS: asking for meeting audio means asking for a display-capture session, and
+    // that session puts the OS screen-recording indicator on the menu bar for the whole
+    // call. Default to staying invisible; the user opts in in Settings > Audio.
+    if (isMac && !(settings && settings.meetingAudio)) {
+      cue.log('system audio: meeting audio is off on macOS -- no display-capture session opened');
+      showStatus('Meeting audio is off, so cue stays invisible. macOS shows a screen-recording indicator whenever an app captures system audio; turn Meeting audio on in Settings \u203a Audio if you want the other side transcribed.');
+      return;
+    }
     sysStarting = true;
     if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
       cue.log('system audio unavailable: getDisplayMedia not supported');
@@ -781,17 +931,28 @@
 
   let sttState = 'disconnected';
 
-  function updateSttStatus({ active, streaming } = {}) {
+  const STT_LABELS = {
+    disconnected: 'Transcription off',
+    connecting: 'Starting transcription…',
+    loading: 'Starting transcription…',
+    streaming: 'Transcription running',
+    batch: 'Transcription running',
+    local: 'Transcription running',
+    stopping: 'Stopping transcription…',
+    error: 'Transcription error'
+  };
+
+  function setSttState(state) {
+    sttState = state;
     const label = document.getElementById('stt-status');
     if (!label) return;
-    if (active === false) {
-      sttState = 'disconnected';
-      label.textContent = 'off';
-    } else if (active === true) {
-      sttState = streaming ? 'connecting' : 'batch';
-      label.textContent = sttState;
-    }
-    label.className = 'stt-status stt-' + sttState;
+    label.textContent = STT_LABELS[state];
+    label.className = 'stt-status stt-' + state;
+  }
+
+  function updateSttStatus({ active, streaming } = {}) {
+    if (active === false) setSttState('disconnected');
+    else if (active === true) setSttState(streaming ? 'connecting' : 'batch');
   }
 
   // ---- transcript history sidebar (hidden by default, manual toggle) ----
@@ -802,23 +963,40 @@
   const tsRowTimer = { you: null, them: null };
   const TS_SENTENCE_GAP_MS = 10000; // 10s silence = new row
 
+  const SIDEBAR_GAP = 12; // matches the 12px offset in .transcript-sidebar
+
+  function placeSidebar(sidebar) {
+    const panel = $('#panel').getBoundingClientRect();
+    const needed = sidebar.offsetWidth + SIDEBAR_GAP;
+    const areaLeft = screen.availLeft;
+    const areaRight = screen.availLeft + screen.availWidth;
+    const fitsRight = window.screenX + panel.right + needed <= areaRight;
+    const fitsLeft = window.screenX + panel.left - needed >= areaLeft;
+    const onLeft = !fitsRight && fitsLeft;
+    if (sidebar.classList.contains('left') === onLeft) return;
+    // Switch sides without animating, so the open transition starts from the new side's tucked position.
+    sidebar.classList.add('ts-instant');
+    sidebar.classList.toggle('left', onLeft);
+    void sidebar.offsetWidth;
+    sidebar.classList.remove('ts-instant');
+  }
+
   function showSidebar() {
     const sidebar = document.getElementById('transcript-sidebar');
     const historyBtn = document.getElementById('history-btn');
-    if (sidebar) sidebar.classList.remove('hidden');
+    if (sidebar) {
+      placeSidebar(sidebar);
+      sidebar.classList.add('open');
+    }
     if (historyBtn) historyBtn.classList.add('active');
-    const panelWrap = document.getElementById('panel-wrap');
-    if (panelWrap) panelWrap.classList.add('sidebar-open');
     sidebarOpen = true;
   }
 
   function hideSidebar() {
     const sidebar = document.getElementById('transcript-sidebar');
     const historyBtn = document.getElementById('history-btn');
-    if (sidebar) sidebar.classList.add('hidden');
+    if (sidebar) sidebar.classList.remove('open');
     if (historyBtn) historyBtn.classList.remove('active');
-    const panelWrap = document.getElementById('panel-wrap');
-    if (panelWrap) panelWrap.classList.remove('sidebar-open');
     sidebarOpen = false;
   }
 
@@ -840,7 +1018,7 @@
   // History button toggle
   const historyBtn = document.getElementById('history-btn');
   if (historyBtn) {
-    historyBtn.innerHTML = icon('message-square-text', { size: 15 });
+    historyBtn.querySelector('.ic').innerHTML = icon('message-square-text', { size: 14 });
     historyBtn.addEventListener('click', toggleSidebar);
   }
 
@@ -929,14 +1107,9 @@
   // ---- events from main --------------------------------------------------
   cue.on('capture:state', ({ active, streaming, mode }) => {
     setLiveDotState(active ? 'idle' : 'off');
-    $('#stop-btn').classList.toggle('active', active);
+    setSessionButton(active);
     // FIX #4: Add .listening class to composer when capture is active
     composer.classList.toggle('listening', active);
-    // Update history button to show active state when listening
-    const historyBtn = document.getElementById('history-btn');
-    if (historyBtn) {
-      historyBtn.classList.toggle('listening', active);
-    }
     // startSystemAudio() is called directly from the stop-button click handler
     // so that the getDisplayMedia request has a fresh user gesture.
     // Here we only start the mic (no gesture required) and stop everything on deactivate.
@@ -953,15 +1126,8 @@
       }
       // Don't auto-close sidebar — let user keep it open if they want
     }
-    updateSttStatus({ active, streaming });
-    if (active) { startMic(); } else { stopMic(); stopSystemAudio(); }
-    if (active && mode === 'local') {
-      sttState = 'local';
-      const label = document.getElementById('stt-status');
-      if (label) { label.textContent = 'local'; label.className = 'stt-status stt-local'; }
-    } else {
-      updateSttStatus({ active, streaming });
-    }
+    if (active && mode === 'local') setSttState('local');
+    else updateSttStatus({ active, streaming });
   });
 
   // ---- real-time transcript display (interim + final) ----
@@ -1026,35 +1192,31 @@
   cue.on('stt:status', ({ channel, status, provider }) => {
     cue.log(`[stt] ${provider || channel || 'unknown'} ${status}`);
     if (provider === 'local') {
-      const label = document.getElementById('stt-status');
-      const localLabels = {
-        loading: 'loading local',
+      const localStates = {
+        loading: 'loading',
         ready: 'local',
         transcribing: 'local',
         stopping: 'stopping',
-        off: 'off',
+        off: 'disconnected',
         error: 'error'
       };
-      sttState = status === 'ready' || status === 'transcribing' ? 'local' : status;
-      if (label) {
-        label.textContent = localLabels[status] || status;
-        label.className = 'stt-status stt-' + sttState;
-      }
-      if (status === 'loading') $('#stop-btn').classList.add('active');
-      if (status === 'off' || status === 'error') $('#stop-btn').classList.remove('active');
+      if (localStates[status]) setSttState(localStates[status]);
+      if (status === 'loading') setSessionButton(true);
+      if (status === 'off' || status === 'error') setSessionButton(false);
       if (status === 'loading' || status === 'transcribing' || status === 'stopping') setLiveDotState('transcribing');
       if (status === 'ready') setLiveDotState('idle');
       if (status === 'off') setLiveDotState('off');
       return;
     }
-    if (status === 'connected') {
-      sttState = 'streaming';
-      const label = document.getElementById('stt-status');
-      if (label) { label.textContent = sttState; label.className = 'stt-status stt-streaming'; }
-    }
+    if (status === 'connected') setSttState('streaming');
   });
   cue.on('vad:state', ({ channel, speaking }) => {
     setLiveDotState(speaking ? 'speaking' : 'idle');
+  });
+  cue.on('slides:update', ({ count, last }) => {
+    if (!count) return;
+    const title = last && last.caption ? last.caption.split('\n')[0].slice(0, 80) : 'Slide ' + count;
+    showToast(`Slide ${count} captured · ${title}`, 3000);
   });
   cue.on('llm:start', ({ userBubble, small, category }) => {
     responseCount++;
@@ -1089,17 +1251,35 @@
     aiEl.appendChild(caretEl);
     group.appendChild(aiEl);
     messages.appendChild(group);
-    // Use requestAnimationFrame so the DOM is fully updated before scrolling
-    requestAnimationFrame(() => {
-      if (sep && sep.isConnected) sep.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
+    followAnswer = true; // the tokens keep the end of this answer in view
+    // Scroll #messages directly rather than calling sep.scrollIntoView(): that
+    // scrolls *every* scrollable ancestor, and once the panel is tall enough it
+    // scrolls the document too, aligning the separator to the top of the window
+    // and pushing #toolbar out of view. html/body are overflow:hidden, so there
+    // is no scrollbar or wheel gesture to undo it — the Stop/Hide/Quit controls
+    // just never come back. The new answer starts at the end of the area (its
+    // separator is at the top whenever the area has room), in one step: the
+    // steps of a smooth scroll would read as the person scrolling away.
+    scrollMessagesToEnd();
     setBusy(true);
   });
-  cue.on('llm:token', ({ text }) => appendToken(text));
+  cue.on('llm:thinking', () => {
+    showThinking();
+    onAnswerActivity(); // a long think is not a lost answer: keep the failsafe away
+  });
+  cue.on('llm:token', ({ text }) => {
+    appendToken(text);
+    onAnswerActivity(); // nor is a long answer that is still streaming
+  });
   cue.on('llm:done', () => { finalizeAi(); setBusy(false); });
-  cue.on('llm:error', ({ message }) => {
+  cue.on('llm:error', ({ message, action, secondary }) => {
     if (!aiEl) startAi(true);
     aiEl.dataset.raw = message; finalizeAi(); setBusy(false);
+    // publik errors carry one action: the renderer's markdown emits no anchors,
+    // so a link needs a real button (same pattern as the mic banner).
+    if (action && action.kind === 'card') { showPublikCard(); return; }
+    // A bad own key carries two: "Switch to publik" (blue) and "Fix my key".
+    if (action && action.kind) showStatus(message, [publikActionButton(action), publikActionButton(secondary, true)]);
   });
   cue.on('transcript', ({ channel, text }) => {
     if (!text || text.trim().length < 2 || /^[?!.,;:\-…]+$/.test(text.trim())) return;
@@ -1113,8 +1293,16 @@
       softClearSTTFill();
     }
   });
+  // Transcript of a meeting resumed at launch: sidebar rows only — no
+  // auto-fill of the input box, which is for live speech.
+  cue.on('transcript:restore', ({ turns }) => {
+    for (const t of turns || []) {
+      if (!t || !t.text || t.text.trim().length < 2) continue;
+      appendTranscriptHistoryTurn(t.channel, t.text, false);
+    }
+  });
   let statusTimer = null;
-  function showStatus(message) {
+  function showStatus(message, button) {
     let el = document.getElementById('cue-status');
     if (!el) {
       el = document.createElement('div');
@@ -1131,20 +1319,37 @@
       }
     }
     el.textContent = message;
+    const buttons = (Array.isArray(button) ? button : [button]).filter(Boolean);
+    buttons.forEach((b) => el.appendChild(b));
+    // What the toast asks for, so a later state can tell it is stale.
+    el.dataset.actions = buttons.map((b) => b.dataset.kind || '').join(' ');
     el.classList.add('show');
     clearTimeout(statusTimer);
-    statusTimer = setTimeout(() => el.classList.remove('show'), 11000);
+    statusTimer = setTimeout(() => el.classList.remove('show'), buttons.length ? 30000 : 11000);
   }
-  cue.on('status', ({ message }) => {
+  // A toast that asked for Reconnect, a sign-in or a switch is stale once
+  // publik is selected and its key is live again (smoke test v0.2.8: the old
+  // "disconnected [Reconnect]" toast stayed up to 30 s after Reconnect worked).
+  const PUBLIK_FIX_KINDS = ['reconnect', 'disclosure', 'switch', 'fix-key'];
+  function clearStalePublikToast(p) {
+    if (!p || !p.connected || p.revoked || !settings || settings.provider !== 'publik') return false;
+    const el = document.getElementById('cue-status');
+    if (!el || !el.classList.contains('show')) return false;
+    const kinds = (el.dataset.actions || '').split(' ');
+    if (!kinds.some((k) => PUBLIK_FIX_KINDS.includes(k))) return false;
+    el.classList.remove('show');
+    el.dataset.actions = '';
+    clearTimeout(statusTimer);
+    return true;
+  }
+  cue.on('status', ({ message, action }) => {
     cue.log('[status] ' + message);
-    showStatus(message);
+    // A publik transcription failure carries one button (Reconnect, or a
+    // publikhq.com link), the same as a failed question.
+    showStatus(message, action && action.kind ? publikActionButton(action) : undefined);
     if (sttState !== 'disconnected') {
       const lower = message.toLowerCase();
-      if (lower.includes('error') || lower.includes(' off')) {
-        sttState = 'error';
-        const label = document.getElementById('stt-status');
-        if (label) { label.textContent = sttState; label.className = 'stt-status stt-error'; }
-      }
+      if (lower.includes('error') || lower.includes(' off')) setSttState('error');
     }
   });
 
@@ -1164,31 +1369,17 @@
   }
   const aiRulesEl = document.getElementById('ai-rules');
   if (aiRulesEl) aiRulesEl.addEventListener('input', updateAiRulesCounter);
-  function updatePrepStatus() {
-    if (!settings) return;
-    const fields = {
-      resume:  !!(settings.resumeText && settings.resumeText.trim()),
-      jd:      !!(settings.jobDescription && settings.jobDescription.trim()),
-      stories: !!(settings.starStories && settings.starStories.trim()),
-      salary:  !!(settings.salaryTarget && settings.salaryTarget.trim())
-    };
-    document.querySelectorAll('#prep-status .prep-item').forEach((el) => {
-      const loaded = fields[el.dataset.field];
-      el.classList.toggle('loaded', loaded);
-      el.classList.toggle('missing', !loaded);
-      el.title = loaded
-        ? el.textContent.trim() + ' loaded'
-        : el.textContent.trim() + ' not set — add in Settings';
-    });
-  }
-
   function updateSmartTooltip() {
     if (!settings) return;
     const m = settings.models[settings.provider] || { fast: '', smart: '' };
-    const fast = m.fast || 'fast model';
-    const smart = m.smart || 'smart model';
+    const fast = (m.fast || '').trim();
+    const smart = (m.smart || '').trim();
     const btn = document.getElementById('smart-toggle');
-    if (btn) btn.title = 'Fast: ' + fast + ' · Smart: ' + smart + ' (higher quality, ~2× slower)';
+    if (!btn) return;
+    const same = fast.toLowerCase() === smart.toLowerCase();
+    btn.classList.toggle('hidden', same);
+    if (same) return;
+    btn.title = 'Fast: ' + (fast || 'fast model') + ' · Smart: ' + (smart || 'smart model') + ' (higher quality, ~2× slower)';
   }
 
   // ---- microphone permission banner --------------------------------------
@@ -1222,17 +1413,42 @@
 
   // ---- settings ----------------------------------------------------------
   const scrim = $('#settings-scrim');
-  function openSettings() { fillSettings(); scrim.classList.remove('hidden'); }
-  async function closeSettings() {
-    if (await saveSettings()) scrim.classList.add('hidden');
+  function showSettingsTab(name) {
+    document.querySelectorAll('.s-tab').forEach((t) => t.classList.toggle('on', t.dataset.tab === name));
+    document.querySelectorAll('.s-tab-pane').forEach((p) => p.classList.toggle('hidden', p.dataset.pane !== name));
   }
+  // Settings always opens on the first tab (publik), with the own-key section
+  // closed unless this build has no publik at all.
   function openSettings() {
     fillSettings();
+    showSettingsTab('keys');
+    const byo = $('#byo-section');
+    if (byo) byo.open = !(publikState && publikState.available);
     scrim.classList.remove('hidden');
     refreshWhisperModels();
+    // A sign-in finished in the browser shows up here without a restart.
+    if (publikState && publikState.connected && !publikState.revoked && cue.publikRefresh) {
+      cue.publikRefresh().then((state) => { if (state) { publikState = state; renderPublikBlock(); renderSetupCta(); } }).catch(() => {});
+    }
   }
-  function closeSettings() { saveSettings(); scrim.classList.add('hidden'); }
+  // Only hide after a successful save. A second closeSettings used to shadow
+  // this one and always dismiss the modal, so validation errors (and any
+  // settings:set throw) vanished with the panel — keys, models, and résumé
+  // looked saved and then came back empty on the next launch.
+  let closingSettings = false;
+  async function closeSettings() {
+    if (closingSettings) return;
+    closingSettings = true;
+    try {
+      if (await saveSettings()) scrim.classList.add('hidden');
+      // A save can change what answers, so the first-run prompt follows it.
+      renderSetupCta();
+    } finally {
+      closingSettings = false;
+    }
+  }
   $('#more-btn').addEventListener('click', openSettings);
+  $('#tb-settings-btn').addEventListener('click', openSettings);
   $('#s-close').addEventListener('click', () => { void closeSettings(); });
   scrim.addEventListener('click', (e) => { if (e.target === scrim) void closeSettings(); });
 
@@ -1339,22 +1555,335 @@
   });
 
   function updateCustomProviderFields() {
-    $('#custom-endpoint-settings').classList.toggle('hidden', settings.provider !== 'custom');
+    const provider = settings.provider;
+    document.querySelectorAll('[data-key-for]').forEach((el) => {
+      el.classList.toggle('hidden', el.dataset.keyFor !== provider);
+    });
+    $('#custom-endpoint-settings').classList.toggle('hidden', provider !== 'custom');
+    const minimaxRegionSettings = $('#minimax-region-settings');
+    if (minimaxRegionSettings) minimaxRegionSettings.classList.toggle('hidden', provider !== 'minimax');
+    const azureEndpointSettings = $('#azure-endpoint-settings');
+    if (azureEndpointSettings) azureEndpointSettings.classList.toggle('hidden', provider !== 'azure');
+    // The closed "Use your own API key instead" section says which own
+    // provider is in use, so nobody has to open it to find out.
+    const current = $('#byo-current');
+    if (current) {
+      const names = window.cuePublikCard.PROVIDER_NAMES;
+      current.textContent = provider && provider !== 'publik' ? `· using ${names[provider] || provider} now` : '';
+    }
+    renderPublikBlock();
   }
 
+  // ---- publik API (packaged-build default) --------------------------------
+  function publikActionButton(action, secondary) {
+    if (!action || !action.kind) return null;
+    const btn = document.createElement('button');
+    btn.dataset.kind = action.kind;
+    if (secondary) btn.classList.add('secondary');
+    if (action.kind === 'link' && action.url) {
+      btn.textContent = action.label || 'Open publikhq.com';
+      btn.addEventListener('click', () => openPublikLink(action.url));
+    } else if (action.kind === 'reconnect') {
+      btn.textContent = action.label || 'Reconnect';
+      // The same path as the overlay Reconnect: a new key, the claim page,
+      // the link poll. Only when no claim page opens (already linked, or the
+      // mint failed) does the toast say what happened.
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        if (!(await reconnectPublik())) showReconnectResult(publikState);
+        renderSetupCta();
+      });
+    } else if (action.kind === 'disclosure') {
+      btn.textContent = 'Sign in with publik';
+      btn.addEventListener('click', () => signInWithPublik());
+    } else if (action.kind === 'switch') {
+      btn.textContent = 'Switch to publik';
+      btn.addEventListener('click', () => switchToPublik());
+    } else if (action.kind === 'card') {
+      btn.textContent = 'Show the publik card';
+      btn.addEventListener('click', () => showPublikCard());
+    } else if (action.kind === 'fix-key') {
+      btn.textContent = action.label || 'Fix my key';
+      btn.addEventListener('click', () => fixOwnKey());
+    } else {
+      return null;
+    }
+    return btn;
+  }
+
+  // What a Reconnect press did, said in the overlay: before, the button only
+  // went grey and the person could not tell whether anything happened.
+  function showReconnectResult(p) {
+    if (!p) return;
+    if (p.connected && !p.revoked) {
+      const cta = p.settingsCta;
+      const linkBtn = cta ? publikActionButton({ kind: 'link', label: cta.label, url: cta.url }) : null;
+      showStatus(`publik API is connected again · key ${p.keyId}.${p.claimState !== 'claimed' ? ' Link this computer to your publik account to use your balance.' : ''}`, linkBtn || undefined);
+      return;
+    }
+    const status = p.status && p.status.text ? p.status.text : 'publik API could not reconnect. Open Settings to try again.';
+    showStatus(status, publikActionButton({ kind: 'reconnect', label: 'Try again' }));
+  }
+
+  // Low starter (CONTRACT §12 / task 3): one non-blocking banner with one
+  // link, once per key while it sits below the 20% line — not on every push.
+  let lowStarterNoticedFor = null;
+  function maybeShowLowStarter(p) {
+    if (!p || !p.lowStarter) { lowStarterNoticedFor = null; return; }
+    if (lowStarterNoticedFor === p.keyId) return;
+    lowStarterNoticedFor = p.keyId;
+    showStatus(p.lowStarter.message, publikActionButton(p.lowStarter.action));
+  }
+
+  // "Fix my key": Settings with the own-key section open on the provider in
+  // use and its key field selected, so a pasted key replaces the bad one.
+  function fixOwnKey() {
+    openSettings();
+    const section = $('#byo-section');
+    if (section) section.open = true;
+    const input = document.getElementById(`key-${settings.provider}`);
+    if (input) { input.focus(); if (input.select) input.select(); }
+    if (section && section.scrollIntoView) section.scrollIntoView({ block: 'nearest' });
+  }
+
+  // "Use my own key": open the closed section at the bottom of the first tab
+  // and pick OpenAI, the most common own key.
+  function selectByoProvider() {
+    const section = $('#byo-section');
+    if (section) section.open = true;
+    const openaiBtn = document.querySelector('#provider-seg button[data-provider="openai"]');
+    if (openaiBtn) openaiBtn.click();
+    $('#key-openai').focus();
+    if (section && section.scrollIntoView) section.scrollIntoView({ block: 'nearest' });
+  }
+
+  // Main may write models.publik (aliases from the mint) and the provider;
+  // take just those from disk so unsaved edits in Settings survive.
+  async function adoptPublikSelection() {
+    settings.provider = 'publik';
+    try {
+      const fresh = await cue.settingsGet();
+      if (fresh && fresh.models && fresh.models.publik) settings.models.publik = fresh.models.publik;
+    } catch (_) { /* keep the local copy */ }
+    document.querySelectorAll('#provider-seg button').forEach((b) => b.classList.remove('on'));
+    const m = settings.models.publik || { fast: '', smart: '' };
+    $('#model-fast').value = m.fast || ''; $('#model-smart').value = m.smart || '';
+    updateCustomProviderFields();
+    $('#s-status').textContent = statusText();
+    updateSmartTooltip();
+    renderSetupCta();
+  }
+
+  // After the key is minted: open the claim link (sign in on publikhq.com and
+  // link this computer) and watch the wallet until the link lands.
+  async function openClaimLink() {
+    const view = window.cuePublikCard.cardView(publikState, 'publik');
+    if (!view.primary || view.primary.kind !== 'link') return false;
+    cue.publikOpen(view.primary.url);
+    if (publikState.card && !publikState.cardShown) publikState = await cue.publikCardSeen();
+    renderPublikBlock();
+    startLinkPoll();
+    return true;
+  }
+
+  // Every Reconnect button (the overlay prompt, the Settings card, a toast
+  // or a failed question): a new key, then the claim page, then the link
+  // poll. True when the claim page opened. Before 0.2.10 the toast Reconnect
+  // only made the key: the person had to press a second button, and cue did
+  // not see the sign-in until the next answer (smoke test v0.2.9).
+  async function reconnectPublik() {
+    publikState = await cue.publikReconnect();
+    renderPublikBlock();
+    return openClaimLink();
+  }
+
+  // A publikhq.com link from a toast or the first-run card (the claim page,
+  // "Link this computer & pick a plan", "Link now"): cue watches the wallet
+  // after it opens, so a sign-in there shows here without another answer.
+  function openPublikLink(url) {
+    cue.publikOpen(url);
+    startLinkPoll();
+  }
+
+  // The browser does the sign-in; cue learns about it from GET /wallet.
+  let linkPollTimer = null;
+  function startLinkPoll() {
+    clearInterval(linkPollTimer);
+    const until = Date.now() + 5 * 60 * 1000;
+    linkPollTimer = setInterval(async () => {
+      if (Date.now() > until || !publikState || !publikState.connected || publikState.claimState === 'claimed') { clearInterval(linkPollTimer); return; }
+      try {
+        publikState = await cue.publikRefresh(); renderPublikBlock(); renderSetupCta();
+        // Not linked a tick ago (see the check above): say it when it lands.
+        showLinkedNotice(publikState);
+      } catch (_) { /* next tick */ }
+    }, 4000);
+  }
+
+  // The moment the sign-in lands: the overlay says so with the balance,
+  // in place of any toast that still asked for the link or a Reconnect.
+  function showLinkedNotice(p) {
+    if (!p || !p.connected || p.revoked || p.claimState !== 'claimed') return false;
+    const view = window.cuePublikCard.cardView(p, 'publik');
+    if (!view.status) return false;
+    showStatus(/[.!?]$/.test(view.status) ? view.status : `${view.status}.`);
+    return true;
+  }
+
+  // "Sign in with publik": consent first (the disclosure dialog states the
+  // cost and the data path; only its button mints a key), then the claim link.
+  async function signInWithPublik() {
+    if (!publikState || !publikState.available) return;
+    if (!publikState.disclosureAccepted) { showPublikDisclosure(); return; }
+    if (!publikState.connected || publikState.revoked) {
+      publikState = await cue.publikReconnect();
+      renderPublikBlock();
+    }
+    if (settings.provider !== 'publik') { publikState = await cue.publikAcceptDisclosure(); await adoptPublikSelection(); }
+    await openClaimLink();
+  }
+
+  // "Switch to publik" from an own key. Nothing else changes: the own keys
+  // stay saved in the closed section.
+  async function switchToPublik() {
+    if (!publikState || !publikState.available) return;
+    if (!publikState.disclosureAccepted) { showPublikDisclosure(); return; }
+    publikState = await cue.publikAcceptDisclosure();
+    await adoptPublikSelection();
+    if (!(await openClaimLink())) renderPublikBlock();
+    // The toast's own "Switch to publik" button lands here too: the overlay
+    // prompt and any stale "key did not work" toast follow the new state.
+    renderSetupCta();
+  }
+
+  async function onPublikPrimary() {
+    const view = window.cuePublikCard.cardView(publikState, settings.provider);
+    const primary = view.primary;
+    if (!primary) return;
+    const btn = $('#publik-primary');
+    btn.disabled = true;
+    try {
+      if (primary.kind === 'switch') await switchToPublik();
+      else if (primary.kind === 'signin') await signInWithPublik();
+      else if (primary.kind === 'link' || primary.kind === 'credit' || primary.kind === 'plan') openPublikLink(primary.url);
+      else if (primary.kind === 'reconnect') await reconnectPublik();
+    } finally {
+      btn.disabled = false;
+      renderPublikBlock();
+      renderSetupCta();
+    }
+  }
+
+  function renderPublikBlock() {
+    const p = publikState;
+    const block = $('#publik-settings');
+    if (!block || !p || !settings) return;
+    const show = (id, on) => $(id).classList.toggle('hidden', !on);
+    const view = window.cuePublikCard.cardView(p, settings.provider);
+    block.classList.toggle('hidden', !view.show);
+    if (!view.show) return;
+    $('#publik-lede').textContent = view.lede;
+    $('#publik-cost-note').textContent = p.copy.cost;
+    $('#publik-data-note').textContent = p.copy.dataPath;
+    // The status sentence: the card view decides it from publik:state, and
+    // keeps the gateway's last answer (lastError) when there is one.
+    const note = $('#publik-status-note');
+    note.classList.toggle('warn', !!view.warn);
+    note.textContent = view.status;
+    // Low starter: the same sentence the banner used, kept on the card.
+    const low = $('#publik-low-note');
+    const lowText = settings.provider === 'publik' && p.lowStarter ? p.lowStarter.message : '';
+    low.textContent = lowText;
+    low.classList.toggle('hidden', !lowText);
+    // "Why it costs money" — the one justification sentence (CONTRACT §12).
+    $('#publik-why-summary').textContent = p.copy.whyItCostsToggle;
+    $('#publik-why-text').textContent = p.copy.whyItCosts;
+    // Exactly one primary button, chosen by state (renderer/publik-card.js).
+    const primary = $('#publik-primary');
+    primary.textContent = view.primary ? view.primary.label : '';
+    show('#publik-primary', !!view.primary);
+    $('#publik-manage').textContent = view.manage ? view.manage.label : '';
+    show('#publik-manage', !!view.manage);
+    $('#publik-add-credit').textContent = view.credit ? view.credit.label : '';
+    show('#publik-add-credit', !!view.credit);
+    show('#publik-disconnect', view.disconnect);
+    if (settings.provider === 'publik') $('#s-status').textContent = statusText();
+  }
+  $('#publik-primary').addEventListener('click', () => { void onPublikPrimary(); });
+  $('#publik-manage').addEventListener('click', () => { const v = window.cuePublikCard.cardView(publikState, settings.provider); if (v.manage) cue.publikOpen(v.manage.url); });
+  $('#publik-add-credit').addEventListener('click', () => { const v = window.cuePublikCard.cardView(publikState, settings.provider); if (v.credit) { cue.publikOpen(v.credit.url); startLinkPoll(); } });
+  $('#publik-pricing').addEventListener('click', () => cue.publikOpen(publikState ? publikState.links.pricing : ''));
+  $('#publik-disconnect').addEventListener('click', async () => { publikState = await cue.publikDisconnect(); renderPublikBlock(); renderSetupCta(); });
+  cue.on('publik:state', (state) => { publikState = state; renderPublikBlock(); renderSetupCta(); maybeShowLowStarter(state); });
+
+  // ---- first-run prompt in the overlay ------------------------------------
+  // While nothing can answer, the top of the panel says how to start. With
+  // publik in the build that is always "Sign in with publik", never "add a key".
+  function renderSetupCta() {
+    if (!settings || !publikState) return false;
+    clearStalePublikToast(publikState);
+    const prompt = window.cuePublikCard.setupPrompt(settings, publikState);
+    let el = document.getElementById('setup-cta');
+    if (!prompt) {
+      if (el) { el.remove(); if (!messages.children.length) showExample(); }
+      return false;
+    }
+    // The example conversation never sits under the prompt: it would read as
+    // if cue were already answering.
+    messages.querySelectorAll('.is-example').forEach((node) => node.remove());
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'setup-cta';
+      el.className = 'setup-cta';
+      const panelMain = document.getElementById('panel-main');
+      panelMain.insertBefore(el, panelMain.firstChild);
+    }
+    el.innerHTML = '';
+    const title = document.createElement('div'); title.className = 'setup-title'; title.textContent = prompt.title;
+    const body = document.createElement('div'); body.className = 'setup-body'; body.textContent = prompt.body;
+    const row = document.createElement('div'); row.className = 'setup-actions';
+    const primary = document.createElement('button'); primary.className = 'setup-primary'; primary.id = 'setup-primary'; primary.textContent = prompt.primary.label;
+    primary.addEventListener('click', () => { void runSetupAction(prompt.primary.kind); });
+    row.appendChild(primary);
+    if (prompt.secondary) {
+      const secondary = document.createElement('button'); secondary.className = 'setup-secondary'; secondary.textContent = prompt.secondary.label;
+      secondary.addEventListener('click', () => { void runSetupAction(prompt.secondary.kind); });
+      row.appendChild(secondary);
+    }
+    el.append(title, body, row);
+    return true;
+  }
+  async function runSetupAction(kind) {
+    if (kind === 'signin') await signInWithPublik();
+    else if (kind === 'link') await openClaimLink();
+    else if (kind === 'switch') await switchToPublik();
+    else if (kind === 'reconnect') await reconnectPublik();
+    else if (kind === 'byo') { openSettings(); selectByoProvider(); }
+    else if (kind === 'fix-key') fixOwnKey();
+    else if (kind === 'settings') openSettings();
+    renderPublikBlock();
+    renderSetupCta();
+  }
+
+  // Keys as they were when Settings opened: saveSettings only follows a key
+  // the person typed in this visit (see there).
+  let keysAtOpen = {};
   function fillSettings() {
+    keysAtOpen = { ...(settings.apiKeys || {}) };
     // Keys tab
     document.querySelectorAll('#provider-seg button').forEach((b) => b.classList.toggle('on', b.dataset.provider === settings.provider));
+    $('#key-cerebras').value = settings.apiKeys.cerebras || '';
     $('#key-openai').value = settings.apiKeys.openai || '';
     $('#key-anthropic').value = settings.apiKeys.anthropic || '';
-    $('#key-gemini').value = settings.apiKeys.gemini || '';
-    $('#key-deepgram').value = settings.apiKeys.deepgram || '';
+    $('#key-groq').value = settings.apiKeys.groq || '';
     $('#key-custom').value = settings.apiKeys.custom || '';
     $('#base-url').value = settings.baseUrl || '';
     updateCustomProviderFields();
+    $('#key-gemini').value = settings.apiKeys.gemini || '';
+    $('#key-deepgram').value = settings.apiKeys.deepgram || '';
     $('#key-ollama').value = settings.apiKeys.ollama || '';
-    $('#key-groq').value = settings.apiKeys.groq || '';
     $('#key-minimax').value = settings.apiKeys.minimax || '';
+    $('#key-deepseek').value = settings.apiKeys.deepseek || '';
     document.querySelectorAll('#minimax-region-seg button').forEach((b) => b.classList.toggle('on', b.dataset.region === (settings.minimaxRegion || 'global_en')));
     $('#key-azure').value = settings.apiKeys.azure || '';
     $('#azure-endpoint').value = settings.azureEndpoint || '';
@@ -1363,26 +1892,32 @@
     fillAppLinkCallers();
     $('#s-status').textContent = statusText();
     // Transcription tab
+    document.querySelectorAll('#meeting-audio-seg button').forEach((button) => {
+      button.classList.toggle('on', (button.dataset.meetingAudio === 'on') === !!settings.meetingAudio);
+    });
+    const meetingAudioNote = $('#meeting-audio-note');
+    if (meetingAudioNote) {
+      meetingAudioNote.textContent = isMac
+        ? 'macOS can only capture system audio through a screen-capture session. While this is on, the menu bar shows the screen-recording indicator and Control Center lists cue under \u201cCurrently Sharing\u201d \u2014 visible to everyone you screen-share with. Off by default; your microphone, screen capture and answers are unaffected.'
+        : 'Transcribes the other participants alongside your microphone. This platform\u2019s loopback capture shows no recording indicator.';
+    }
     document.querySelectorAll('#stt-provider-seg button').forEach((button) => {
       button.classList.toggle('on', button.dataset.sttProvider === (settings.sttProvider || 'auto'));
     });
     const localWhisper = settings.localWhisper || { modelId: 'base.en', language: 'auto', threads: 0 };
     $('#whisper-language').value = localWhisper.language || 'auto';
     $('#whisper-threads').value = Number(localWhisper.threads) || 0;
-    // Profile tab
-    $('#resume-text').value = settings.resumeText || '';
-    $('#job-description').value = settings.jobDescription || '';
-    // Interview Prep tab
-    $('#star-stories').value = settings.starStories || '';
-    $('#why-company').value = settings.whyCompany || '';
-    $('#why-leaving').value = settings.whyLeaving || '';
-    $('#work-style').value = settings.workStyle || '';
+    // Slides tab (inside Transcription pane)
+    const slidesCfg = settings.slides || { enabled: false, intervalMs: 3000 };
+    const slidesEnabled = $('#slides-enabled');
+    if (slidesEnabled) slidesEnabled.checked = !!slidesCfg.enabled;
+    const slidesInterval = $('#slides-interval');
+    if (slidesInterval) slidesInterval.value = slidesCfg.intervalMs || 3000;
     // Style tab
     $('#ai-rules').value = settings.aiRules || '';
     updateAiRulesCounter();
-    // Q&A tab
-    $('#salary-target').value = settings.salaryTarget || '';
-    $('#questions-to-ask').value = settings.questionsToAsk || '';
+    // Appearance tab
+    applyOpacity(settings.opacity, false);
   }
 
   // Whoever cue has been told it may answer questions for. Empty is the normal
@@ -1421,39 +1956,24 @@
     }
   }
 
-  const uploadResumeBtn = document.getElementById('upload-resume-btn');
-  if (uploadResumeBtn) uploadResumeBtn.addEventListener('click', async () => {
-    const res = await cue.pickProfileDocument();
-    if (!res || res.canceled) return;
-    if (res.error) { showStatus('Resume import failed: ' + res.error); return; }
-    $('#resume-text').value = res.text || '';
-    showStatus('Imported ' + res.fileName + ' — press Save to keep it.');
-  });
-  const uploadJdBtn = document.getElementById('upload-jd-btn');
-  if (uploadJdBtn) uploadJdBtn.addEventListener('click', async () => {
-    const res = await cue.pickProfileDocument();
-    if (!res || res.canceled) return;
-    if (res.error) { showStatus('Job description import failed: ' + res.error); return; }
-    $('#job-description').value = res.text || '';
-    showStatus('Imported ' + res.fileName + ' — press Save to keep it.');
-  });
-
   function statusText() {
     const k = settings.apiKeys;
-    const labels = { openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Gemini', deepgram: 'Deepgram', custom: 'Custom', ollama: 'Ollama', groq: 'Groq', minimax: 'MiniMax', azure: 'Azure AI Foundry' };
+    const labels = { publik: 'publik', cerebras: 'Cerebras', openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Gemini', deepgram: 'Deepgram', custom: 'Custom', ollama: 'Ollama', groq: 'Groq', minimax: 'MiniMax', deepseek: 'DeepSeek', azure: 'Azure AI Foundry' };
     const has = Object.keys(labels).filter((p) => k[p]).map((p) => labels[p]);
+    const publikPart = settings.provider === 'publik' && publikState
+      ? ` · ${publikState.connected ? (publikState.balanceLabel ? `balance ${publikState.balanceLabel}` : 'connected') : 'not set up'}`
+      : '';
     // 'auto' walks the same fallback chain src/stt.js builds; an explicit choice
     // is reported as-is so the status line matches what will actually be used.
     const selectedSttProvider = settings.sttProvider || 'auto';
-    const automaticStt = k.deepgram ? 'Deepgram (streaming)' : (k.openai ? 'OpenAI Realtime' : (k.groq ? 'Groq Whisper' : (k.gemini ? 'Gemini (batch)' : 'none')));
+    const publikStt = settings.provider === 'publik' && publikState && publikState.connected && !publikState.revoked;
+    // With publik as the provider, Auto means publik API only (src/stt.js
+    // publikOwnsAutoAudio); own keys count only for another provider.
+    const automaticStt = settings.provider === 'publik'
+      ? (publikStt ? 'publik API' : 'none')
+      : (k.openai ? 'OpenAI Realtime' : (k.groq ? 'Groq Whisper' : (k.gemini ? 'Gemini' : 'none')));
     const stt = selectedSttProvider === 'auto' ? automaticStt : selectedSttProvider;
-    const ready = [
-      settings.resumeText ? '✓ resume' : null,
-      settings.jobDescription ? '✓ JD' : null,
-      settings.starStories ? '✓ stories' : null,
-      settings.salaryTarget ? '✓ salary' : null
-    ].filter(Boolean);
-    return `${labels[settings.provider] || settings.provider} · STT: ${stt}` + (ready.length ? ' · ' + ready.join(' · ') : '');
+    return `${labels[settings.provider] || settings.provider}${publikPart} · STT: ${stt}`;
   }
 
   document.querySelectorAll('#provider-seg button').forEach((b) => b.addEventListener('click', () => {
@@ -1468,6 +1988,12 @@
   document.querySelectorAll('#minimax-region-seg button').forEach((b) => b.addEventListener('click', () => {
     settings.minimaxRegion = b.dataset.region;
     document.querySelectorAll('#minimax-region-seg button').forEach((x) => x.classList.toggle('on', x === b));
+  }));
+  document.querySelectorAll('#meeting-audio-seg button').forEach((button) => button.addEventListener('click', () => {
+    settings.meetingAudio = button.dataset.meetingAudio === 'on';
+    document.querySelectorAll('#meeting-audio-seg button').forEach((candidate) => {
+      candidate.classList.toggle('on', candidate === button);
+    });
   }));
 
   document.querySelectorAll('#stt-provider-seg button').forEach((button) => button.addEventListener('click', () => {
@@ -1620,42 +2146,63 @@
 
   async function saveSettings() {
     // Keys
+    settings.apiKeys.cerebras = $('#key-cerebras').value.trim();
     settings.apiKeys.openai = $('#key-openai').value.trim();
     settings.apiKeys.anthropic = $('#key-anthropic').value.trim();
-    settings.apiKeys.gemini = $('#key-gemini').value.trim();
-    settings.apiKeys.deepgram = $('#key-deepgram').value.trim();
+    settings.apiKeys.groq = $('#key-groq').value.trim();
     settings.apiKeys.custom = $('#key-custom').value.trim();
     settings.baseUrl = $('#base-url').value.trim();
+    settings.apiKeys.gemini = $('#key-gemini').value.trim();
+    settings.apiKeys.deepgram = $('#key-deepgram').value.trim();
     settings.apiKeys.ollama = $('#key-ollama').value.trim();
-    settings.apiKeys.groq = $('#key-groq').value.trim();
     settings.apiKeys.minimax = $('#key-minimax').value.trim();
+    settings.apiKeys.deepseek = $('#key-deepseek').value.trim();
     settings.apiKeys.azure = $('#key-azure').value.trim();
     settings.azureEndpoint = $('#azure-endpoint').value.trim();
     if (!settings.models[settings.provider]) settings.models[settings.provider] = {};
     settings.models[settings.provider].fast = $('#model-fast').value.trim();
     settings.models[settings.provider].smart = $('#model-smart').value.trim();
+    // If the active provider still has no key, but the user just filled in a
+    // key for a different provider (without touching the Provider selector —
+    // the flow both bug reports describe), switch to that provider. Without
+    // this, `settings.provider` stays on its default ('openai') forever and
+    // cue keeps reporting itself unconfigured even though a valid key was
+    // saved for the provider the user actually meant to use.
+    // The renderer never sees the publik key (apiKeys.publik is always ''),
+    // so "the active provider has no key" was always true for publik: every
+    // Settings close sent a person who had just picked publik back to an old
+    // own key (smoke test 2026-11-02, a 0.2.4 file with an OpenAI key). Two
+    // rules now: a connected publik stays selected, and only a key typed in
+    // this visit can move the provider.
+    const publikLive = settings.provider === 'publik' && !!(publikState && publikState.connected && !publikState.revoked);
+    if (!publikLive && !settings.apiKeys[settings.provider]) {
+      const keyedProviders = ['cerebras', 'openai', 'anthropic', 'gemini', 'groq', 'minimax', 'deepseek', 'azure'];
+      const justFilled = keyedProviders.find((p) => settings.apiKeys[p] && settings.apiKeys[p] !== (keysAtOpen[p] || ''));
+      if (justFilled) settings.provider = justFilled;
+    }
     // Transcription
     if (!settings.localWhisper) settings.localWhisper = {};
     settings.localWhisper.modelId = $('#whisper-model').value || settings.localWhisper.modelId || 'base.en';
     settings.localWhisper.language = $('#whisper-language').value || 'auto';
     settings.localWhisper.threads = Math.max(0, Math.min(64, Number.parseInt($('#whisper-threads').value, 10) || 0));
-    // Profile
-    settings.resumeText = $('#resume-text').value.trim();
-    settings.jobDescription = $('#job-description').value.trim();
-    // Interview Prep
-    settings.starStories = $('#star-stories').value.trim();
-    settings.whyCompany = $('#why-company').value.trim();
-    settings.whyLeaving = $('#why-leaving').value.trim();
-    settings.workStyle = $('#work-style').value.trim();
+    // Slides (opt-in, memory-only)
+    if (!settings.slides) settings.slides = {};
+    const slidesEnabledEl = $('#slides-enabled');
+    const slidesIntervalEl = $('#slides-interval');
+    if (slidesEnabledEl) settings.slides.enabled = !!slidesEnabledEl.checked;
+    if (slidesIntervalEl) {
+      const v = Number.parseInt(slidesIntervalEl.value, 10) || 3000;
+      settings.slides.intervalMs = Math.max(1500, Math.min(15000, v));
+    }
     // Style tab
     settings.aiRules = $('#ai-rules').value.trim();
-    // Q&A
-    settings.salaryTarget = $('#salary-target').value.trim();
-    settings.questionsToAsk = $('#questions-to-ask').value.trim();
+    // Appearance tab
+    const opacitySlider = $('#s-opacity-slider');
+    if (opacitySlider) settings.opacity = clampOpacity(Number(opacitySlider.value) / 100);
     try {
       settings = await cue.settingsSet(settings);
+      keysAtOpen = { ...(settings.apiKeys || {}) };
       $('#s-status').textContent = statusText();
-      updatePrepStatus();
       updateSmartTooltip();
       return true;
     } catch (error) {
@@ -1674,23 +2221,54 @@
     ai.className = 'ai-text';
     ai.textContent = '“A discounted cash flow model values a company by projecting future free cash flows and discounting them to present value using the weighted average cost of capital.”';
     messages.appendChild(ai);
+    // Marked so the sign-in prompt can take its place (renderSetupCta).
+    messages.querySelectorAll('.user-bubble, .ai-text').forEach((el) => el.classList.add('is-example'));
   }
 
   // ---- global keys -------------------------------------------------------
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !scrim.classList.contains('hidden')) closeSettings();
+    if (e.key === 'Escape' && !scrim.classList.contains('hidden')) void closeSettings();
     if ((e.metaKey || e.ctrlKey) && e.key === ',') { e.preventDefault(); openSettings(); }
   });
 
+  // Safety net for the same class of bug: html/body are overflow:hidden, so any
+  // stray programmatic scroll of the document is invisible to the user and
+  // unrecoverable by mouse. Snap it back so the toolbar cannot be stranded.
+  window.addEventListener('scroll', () => {
+    if (window.scrollY || window.scrollX) window.scrollTo(0, 0);
+  }, { passive: true });
+
   // ---- click-through: only the UI blocks the mouse; empty gaps pass to your screen ----
   let ignoring = null;
+  let draggingWindow = false;
   function setIgnore(v) { if (v !== ignoring) { ignoring = v; cue.setIgnoreMouse(v); } }
   document.addEventListener('mousemove', (e) => {
+    // The window trails the cursor while dragging; going click-through then would drop the release.
+    if (draggingWindow) return;
     const el = document.elementFromPoint(e.clientX, e.clientY);
-    const overUI = !!(el && el.closest && el.closest('#toolbar, #panel-wrap, #transcript-sidebar, #sessions-scrim, #settings-scrim, #onboard-scrim, #consent-scrim'));
+    const overUI = !!(el && el.closest && el.closest('#toolbar, #panel-wrap, #transcript-sidebar, #sessions-scrim, #settings-scrim, #onboard-scrim, #consent-scrim, #update-scrim'));
     setIgnore(!overUI);
   });
   setIgnore(true); // start fully click-through; hovering the panel re-enables it
+
+  // ---- window drag: press anywhere on the toolbar that isn't a control ----
+  const toolbar = $('#toolbar');
+  toolbar.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.target.closest('button, input, .tb-opacity-wrap')) return;
+    e.preventDefault();
+    toolbar.setPointerCapture(e.pointerId);
+    draggingWindow = true;
+    setIgnore(false);
+    toolbar.classList.add('dragging');
+    cue.windowDragStart();
+  });
+  // Fires on release, cancel, or anything else that ends the press.
+  toolbar.addEventListener('lostpointercapture', () => {
+    if (!draggingWindow) return;
+    draggingWindow = false;
+    toolbar.classList.remove('dragging');
+    cue.windowDragEnd();
+  });
 
   // ---- assistant access request ------------------------------------------
   // Shown here rather than as a native dialog because cue hides its dock icon:
@@ -1729,6 +2307,53 @@
     if (e.key === 'Escape' && pendingConsentId) { e.preventDefault(); answerConsent(false); }
   });
 
+  // ---- updates (publik-updater.cjs) --------------------------------------
+  // "Check for Updates…" in Settings, and the updater's messages ("cue X is
+  // ready to install." Restart Now / Later). In this window for the same
+  // reason as the access request above; #update-scrim is in the click-through
+  // selector and in styles.css for the same reason too. One message at a time.
+  const updateScrim = $('#update-scrim');
+  const updateQueue = [];
+  let shownUpdate = null;
+
+  function answerUpdate(response) {
+    if (!shownUpdate) return;
+    cue.updatesRespond(shownUpdate.id, response);
+    shownUpdate = null;
+    updateScrim.classList.add('hidden');
+    showNextUpdate();
+  }
+
+  function showNextUpdate() {
+    if (shownUpdate || !updateQueue.length) return;
+    shownUpdate = updateQueue.shift();
+    $('#up-title').textContent = shownUpdate.message;
+    $('#up-body').textContent = shownUpdate.detail;
+    const actions = $('#up-actions');
+    actions.textContent = '';
+    shownUpdate.buttons.forEach((label, i) => {
+      const button = document.createElement('button');
+      button.className = i === shownUpdate.defaultId ? 'ob-primary' : 'ob-ghost';
+      button.textContent = label;
+      button.addEventListener('click', () => answerUpdate(i));
+      actions.appendChild(button);
+    });
+    updateScrim.classList.remove('hidden');
+    setIgnore(false);
+    const first = actions.children[shownUpdate.defaultId];
+    if (first) first.focus();
+  }
+
+  cue.on('updates:message', (message) => { updateQueue.push(message); showNextUpdate(); });
+  // Escape and clicking away answer with the cancel button ("Later" or "OK").
+  updateScrim.addEventListener('click', (e) => { if (e.target === updateScrim && shownUpdate) answerUpdate(shownUpdate.cancelId); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && shownUpdate) { e.preventDefault(); answerUpdate(shownUpdate.cancelId); }
+  });
+  const checkUpdatesButton = $('#s-check-updates');
+  if (!isMac && !isWindows) checkUpdatesButton.classList.add('hidden'); // Linux: manual download
+  checkUpdatesButton.addEventListener('click', () => cue.updatesCheck());
+
   // ---- onboarding / first-run tutorial -----------------------------------
   const obScrim = $('#onboard-scrim');
   const permissionHelp = isWindows
@@ -1743,54 +2368,185 @@
         { label: 'Open Microphone settings', action: () => cue.openPane('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone') },
         { label: 'Open Screen Recording settings', action: () => cue.openPane('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture') }
       ];
-  const assistShortcut = isWindows ? '<span class="kbd">Ctrl</span> <span class="kbd">↵</span>' : '<span class="kbd">⌘</span> <span class="kbd">↵</span>';
-  const solveShortcut = isWindows ? '<span class="kbd">Ctrl</span> <span class="kbd">H</span>' : '<span class="kbd">⌘</span> <span class="kbd">H</span>';
+  const assistShortcut = isWindows ? '<span class="kbd">Ctrl</span><span class="kbd">⇧</span><span class="kbd">↵</span>' : '<span class="kbd">⌘</span><span class="kbd">⇧</span><span class="kbd">↵</span>';
+  const sayShortcut = isWindows ? '<span class="kbd">Ctrl</span> <span class="kbd">↵</span>' : '<span class="kbd">⌘</span> <span class="kbd">↵</span>';
   const quitShortcut = isWindows ? '<span class="kbd">Ctrl</span><span class="kbd">⇧</span><span class="kbd">X</span>' : '<span class="kbd">⌘</span><span class="kbd">⇧</span><span class="kbd">X</span>';
   const OB_STEPS = [
     {
       icon: '👋',
       title: 'Welcome to cue',
-      body: 'cue is a private AI copilot that floats over your screen. It can <strong>see your screen</strong>, <strong>hear your meetings</strong>, and help you answer questions or solve coding problems — while staying hidden from most screen shares.<br><br>This quick guide gets you running in about a minute.'
+      body: 'cue is a private AI copilot that floats over your screen. It can see your screen, hear your meetings, and help you answer questions – while staying hidden from screen shares.',
+      welcome: true
     },
     {
       icon: '🔐',
       title: 'Allow cue to see & hear',
-      body: permissionHelp + '<ul><li><strong>Microphone</strong> — to hear you</li><li><strong>Screen recording</strong> — to see your screen and hear meeting audio</li></ul>',
-      buttons: permissionButtons
+      body: permissionHelp + '<ul><li><strong>Microphone</strong> – to hear you</li><li><strong>Screen recording</strong> – to see your screen and hear your meeting</li></ul>' +
+        `<span class="ob-fine">You can also do this later in ${isWindows ? 'Windows Settings' : 'System Settings'}.</span>`,
+      buttons: permissionButtons,
+      permissions: true
     },
     {
-      icon: '🔑',
-      title: 'Connect an AI provider',
-      body: 'cue uses <strong>your own</strong> API key — pick <span class="hl">OpenAI</span>, <span class="hl">Anthropic</span>, <span class="hl">Google Gemini</span>, or <span class="hl">Azure AI Foundry</span>. Get a key from your provider, then paste it into cue\'s Settings.<br><br><strong>Tip:</strong> For the <em>best</em> real-time listening, add a <span class="hl">Deepgram</span> key (lowest latency streaming transcription). Otherwise, an OpenAI key enables streaming via the Realtime API, and Gemini/Whisper work as batch fallbacks.',
-      buttons: [{ label: 'Open cue Settings', action: () => { finishOnboard(); openSettings(); } }]
-    },
-    {
-      icon: '🫥',
-      title: 'Stay hidden in Zoom',
-      body: 'cue is hidden from most screen shares automatically (Google Meet, Teams, QuickTime — nothing to do). <strong>Zoom needs one setting:</strong><br><br>Zoom → <span class="hl">Settings</span> → <span class="hl">Share Screen</span> → <span class="hl">Advanced</span> → <strong>Screen capture mode</strong> → choose <strong>“Advanced capture with window filtering.”</strong><br><br>Avoid “<strong>without</strong> window filtering” — that mode reveals cue.'
+      icon: '⚙️',
+      connectModel: true,
+      title: 'Connect an AI model',
+      body: 'cue needs an AI model to answer. Add an API key for any provider in Settings.',
+      buttons: [{ label: 'Open Settings', action: () => { finishOnboard(); openSettings(); } }]
     },
     {
       icon: '✨',
       title: 'You’re all set',
-      body: 'How to use cue:<ul><li>' + assistShortcut + ' — <strong>Assist</strong> with whatever\'s on screen or being said</li><li>' + solveShortcut + ' — solve a coding problem on screen</li><li>Click <strong>▢</strong> in the top bar to start listening to a meeting</li><li>Type a question and press <span class="kbd">↵</span></li></ul>Reopen this guide anytime by clicking the <strong>cue logo</strong>. Quit with ' + quitShortcut + '.'
+      body: 'How to use cue:<ul><li>' + sayShortcut + ' — <strong>What should I say?</strong> from the conversation</li><li>' + assistShortcut + ' — <strong>Smart assist</strong> with whatever\'s on screen or being said</li><li>Click <strong>Start session</strong> in the top bar to start listening to a meeting</li><li>Type a question and press <span class="kbd">↵</span></li></ul>Reopen this guide anytime by clicking the <strong>help</strong> icon in the top bar. Quit with ' + quitShortcut + '.'
     }
   ];
+  // First-run disclosure (R21 §4.3): two disclosures — cost and data path —
+  // and a visible "use my own key" branch. Copy comes from main (one source).
+  // Only "Continue" mints a key; Next/Skip never provision.
+  // A failed setup keeps the person on this step with the reason in plain
+  // words and "Try again", instead of moving on to "You're all set".
+  let obPublikError = '';
+  // In onboarding this is step 1, "Welcome to cue": one line that cue runs on
+  // the publik balance with no key, the blue "Sign in with publik", a small
+  // "Use my own key instead" link, and the cost and data-path fine print
+  // under the buttons (smoke test v0.2.8: at 3 s a new user saw only a
+  // welcome card, and the sign-in was on step 3 of 4). Opened as a dialog
+  // (Settings, the overlay) it keeps its own title and full text.
+  const WELCOME_SUB = 'A private AI copilot over your screen. It sees your screen, hears your meetings, and stays hidden from screen shares.';
+  function publikStep() {
+    const c = publikState.copy.disclosure;
+    // Already signed in (the guide reopened from the help icon): nothing to press.
+    const live = () => !!(publikState.connected && !publikState.revoked && settings && settings.provider === 'publik');
+    const step = {
+      icon: () => (obDialog ? '🪙' : '👋'),
+      title: () => (obDialog ? c.title : 'Welcome to cue'),
+      body: () => (obDialog
+        ? `${esc(c.intro)}<br><br><strong>Cost.</strong> ${esc(c.cost)}<br><br><strong>Where your prompts go.</strong> ${esc(c.dataPath)}` +
+          `<span class="ob-fine">${esc(c.terms)} <a id="ob-publik-terms">publik API terms</a></span>`
+        : `<div class="ob-lede">${esc(live() ? 'cue runs on your publik balance. This computer is signed in.' : window.cuePublikCard.COPY.lede)}</div>` +
+          `<div class="ob-sub">${esc(WELCOME_SUB)}</div>`),
+      after: () => (obDialog || live() ? ''
+        : `<p><strong>Cost.</strong> ${esc(c.cost)}</p><p><strong>Where your prompts go.</strong> ${esc(c.dataPath)}</p>` +
+          `<p>${esc(c.terms)} <a id="ob-publik-terms">publik API terms</a></p>`),
+      hideButtons: () => !obDialog && live(),
+      error: () => (obPublikError ? `<strong>Setup did not finish.</strong> ${esc(obPublikError)}` : ''),
+      buttons: [
+        { label: c.accept, primary: true, action: async () => {
+          const btns = $('#ob-buttons').querySelectorAll('button'); btns.forEach((b) => { b.disabled = true; });
+          publikState = await cue.publikAcceptDisclosure(); await adoptPublikSelection();
+          if (!publikState.connected || publikState.revoked) {
+            obPublikError = publikState.problem || 'Setup did not finish.';
+            step.buttons[0].label = 'Try again';
+            renderOnboard();
+            return;
+          }
+          obPublikError = '';
+          step.buttons[0].label = c.accept;
+          // "Sign in with publik": straight to the claim link on publikhq.com,
+          // which links this computer to the account. The card is marked seen
+          // there, as its own primary button does.
+          if (await openClaimLink()) { if (obDialog) hideOnboardDialog(); else { obIndex++; renderOnboard(); } return; }
+          // CONTRACT §12.1: the card comes right after POST /installs succeeds,
+          // with the real balance on it. Nothing is spent before it is seen.
+          if (publikState.card) { showPublikCard(); return; }
+          if (obDialog) { hideOnboardDialog(); } else { obIndex++; renderOnboard(); }
+        } },
+        { label: c.decline, link: true, action: () => { if (obDialog) hideOnboardDialog(); else finishOnboard(); openSettings(); selectByoProvider(); } }
+      ]
+    };
+    return step;
+  }
+  // The first-run card (CONTRACT §12.1), in this order: (a) the balance line
+  // from the mint response, (b) the one-sentence justification, (c) the
+  // primary button that opens claim_url — and "Later", which keeps the key
+  // and the balance. Everything is painted from publikState.card (src/publik.js
+  // ctaView), so the copy has one source and the link rule is tested there.
+  function publikCardStep() {
+    const card = publikState.card;
+    const done = async () => {
+      publikState = await cue.publikCardSeen(); renderPublikBlock();
+      const idx = OB_STEPS.findIndex((st) => st.publikCard);
+      if (idx >= 0) OB_STEPS.splice(idx, 1);
+      if (obDialog) { hideOnboardDialog(); return; }
+      if (obIndex >= OB_STEPS.length) finishOnboard(); else renderOnboard();
+    };
+    const buttons = [];
+    if (card.primary) {
+      buttons.push({ label: card.primary.label, primary: true, action: async () => { openPublikLink(card.primary.url); await done(); } });
+    }
+    buttons.push({ label: card.secondary.label, action: done });
+    return {
+      icon: '✅',
+      title: card.title,
+      body: () => `<div class="publik-card-balance">${esc(card.balance)}</div><div class="publik-card-why">${esc(card.why)}</div>`,
+      buttons,
+      publikCard: true
+    };
+  }
+  function esc(text) { const d = document.createElement('div'); d.textContent = text; return d.innerHTML; }
+  let obDialog = false; // true while the publik card is shown alone, after onboarding
+  function showPublikDisclosure() {
+    if (!publikState || !publikState.available) return;
+    const idx = OB_STEPS.findIndex((st) => st.publik);
+    if (idx < 0) return;
+    obDialog = true;
+    $('#onboard').classList.add('dialog');
+    obIndex = idx; renderOnboard();
+    obScrim.classList.remove('hidden'); setIgnore(false);
+  }
+  // Show the card: inside onboarding it becomes the next step; afterwards it
+  // is a dialog of its own (also reached from the "never a silent starter"
+  // gate in main.js runFeature).
+  function showPublikCard() {
+    if (!publikState || !publikState.card) return;
+    const existing = OB_STEPS.findIndex((st) => st.publikCard);
+    if (existing >= 0) OB_STEPS.splice(existing, 1);
+    const inOnboarding = !obScrim.classList.contains('hidden') && !obDialog;
+    if (inOnboarding) {
+      const idx = OB_STEPS.findIndex((st) => st.publik);
+      OB_STEPS.splice(idx + 1, 0, publikCardStep());
+      obIndex = idx + 1; renderOnboard();
+      return;
+    }
+    OB_STEPS.push(publikCardStep());
+    obDialog = true;
+    $('#onboard').classList.add('dialog');
+    obIndex = OB_STEPS.length - 1; renderOnboard();
+    obScrim.classList.remove('hidden'); setIgnore(false);
+  }
+  function hideOnboardDialog() { obDialog = false; $('#onboard').classList.remove('dialog'); obScrim.classList.add('hidden'); }
+
   let obIndex = 0;
   function renderOnboard() {
     const step = OB_STEPS[obIndex];
-    $('#ob-icon').textContent = step.icon;
-    $('#ob-title').textContent = step.title;
-    $('#ob-body').innerHTML = step.body;
+    const val = (x) => (typeof x === 'function' ? x() : x);
+    $('#ob-icon').textContent = val(step.icon);
+    $('#ob-title').textContent = val(step.title);
+    $('#ob-body').innerHTML = val(step.body);
+    const stepError = typeof step.error === 'function' ? step.error() : '';
+    $('#ob-error').innerHTML = stepError;
+    $('#ob-error').classList.toggle('hidden', !stepError);
+    const after = val(step.after) || '';
+    $('#ob-after').innerHTML = after;
+    $('#ob-after').classList.toggle('hidden', !after);
+    const termsLink = $('#ob-publik-terms');
+    if (termsLink) termsLink.addEventListener('click', () => cue.publikOpen(publikState.links.terms));
     const btns = $('#ob-buttons'); btns.innerHTML = '';
-    (step.buttons || []).forEach((b) => { const el = document.createElement('button'); el.textContent = b.label; el.addEventListener('click', b.action); btns.appendChild(el); });
+    const noButtons = typeof step.hideButtons === 'function' && step.hideButtons();
+    (noButtons ? [] : step.buttons || []).forEach((b) => { const el = document.createElement('button'); el.textContent = b.label; if (b.primary) el.classList.add('ob-cta'); if (b.link) el.classList.add('ob-link'); el.addEventListener('click', b.action); btns.appendChild(el); });
+    // The publik card has its own two buttons and no Next/Skip: leaving it any
+    // other way would spend the starter without the card being acknowledged.
+    $('#onboard').classList.toggle('card', !!step.publikCard);
     const dots = $('#ob-dots'); dots.innerHTML = '';
     OB_STEPS.forEach((_, i) => { const d = document.createElement('span'); if (i === obIndex) d.className = 'on'; dots.appendChild(d); });
     $('#ob-back').style.visibility = obIndex === 0 ? 'hidden' : 'visible';
     $('#ob-next').textContent = obIndex === OB_STEPS.length - 1 ? 'Done' : 'Next';
+    // On the publik step the one blue button is "Sign in with publik"; Next stays quiet.
+    $('#ob-next').classList.toggle('quiet', !!step.publik && !noButtons);
     $('#ob-skip').style.visibility = obIndex === OB_STEPS.length - 1 ? 'hidden' : 'visible';
   }
-  function showOnboard() { obIndex = 0; renderOnboard(); obScrim.classList.remove('hidden'); setIgnore(false); }
+  function showOnboard() { obDialog = false; $('#onboard').classList.remove('dialog'); obIndex = 0; renderOnboard(); obScrim.classList.remove('hidden'); setIgnore(false); }
   async function finishOnboard() {
+    if (obDialog) { hideOnboardDialog(); return; }
     obScrim.classList.add('hidden');
     if (settings && !settings.onboarded) { settings.onboarded = true; await cue.settingsSet({ onboarded: true }); }
   }
@@ -1803,15 +2559,38 @@
   (async function boot() {
     settings = await cue.settingsGet();
     const platformInfo = await cue.platformInfo();
+    publikState = await cue.publikState();
+    // A build with no app token never shows the option, and keeps the BYO
+    // onboarding card. With one, the "Connect an AI provider" card becomes the
+    // publik disclosure; the BYO branch stays one tap away on that card.
+    // Settings opens on the publik tab; a build without publik names that tab
+    // for keys, since keys are all it can offer.
+    if (!publikState.available) {
+      $('#s-tab-main').textContent = '🔑 API Keys';
+      $('#byo-title').textContent = 'API keys';
+    }
+    // publik first: with publik in the build, step 1 is the sign-in (it
+    // replaces the plain welcome), the permissions step comes after it, and
+    // the "Connect an AI model" step goes.
+    if (publikState.available) {
+      OB_STEPS.splice(OB_STEPS.findIndex((st) => st.connectModel), 1);
+      OB_STEPS.splice(OB_STEPS.findIndex((st) => st.welcome), 1, { ...publikStep(), publik: true });
+    }
 
     // R4: shortcut hints
     const sayHintEl = document.getElementById('say-shortcut-hint');
     const assistHintEl = document.getElementById('assist-shortcut-hint');
-    if (sayHintEl) sayHintEl.textContent = isWindows ? 'Ctrl+Shift+↵' : '⌘⇧↵';
-    if (assistHintEl) assistHintEl.textContent = isWindows ? 'Ctrl+↵' : '⌘↵';
+    if (sayHintEl) sayHintEl.textContent = isWindows ? 'Ctrl+↵' : '⌘↵';
+    if (assistHintEl) assistHintEl.textContent = isWindows ? 'Ctrl+Shift+↵' : '⌘⇧↵';
+    const sayBtn = document.querySelector('.act[data-mode="say"]');
+    const assistBtn = document.querySelector('.act[data-mode="assist"]');
+    if (sayBtn) sayBtn.title = isWindows
+      ? 'Suggests what to say next based on the conversation (Ctrl+Enter)'
+      : 'Suggests what to say next based on the conversation (⌘↵)';
+    if (assistBtn) assistBtn.title = isWindows
+      ? 'Scans your screen and conversation to decide what you need (Ctrl+Shift+Enter)'
+      : 'Scans your screen and conversation to decide what you need (⌘⇧↵)';
 
-    // R5: prep status
-    updatePrepStatus();
     // R6: smart tooltip
     updateSmartTooltip();
     // Fix 3: Adjust permission buttons based on actual Windows version.
@@ -1820,25 +2599,28 @@
     // with a more helpful note instead of an invalid settings link.
     if (isWindows && platformInfo.winBuild > 0 && platformInfo.winBuild < 22000) {
       // Windows 10: update the onboarding screen recording button to be more helpful
-      const ob = OB_STEPS[1];
+      const ob = OB_STEPS.find((st) => st.permissions);
       ob.buttons = ob.buttons.filter((b) => !b.label.toLowerCase().includes('screen'));
-      ob.body = 'cue needs microphone permission to hear you. Click the button below to open Windows microphone settings and allow cue.<br><br><strong>Screen capture works automatically on Windows 10</strong> — no additional permission needed.<ul><li><strong>Microphone</strong> — to hear you</li><li><strong>Screen recording</strong> — works automatically on Windows 10</li></ul>';
+      ob.body = 'cue needs microphone permission to hear you. Click the button below to open Windows microphone settings and allow cue.<br><br><strong>Screen capture works automatically on Windows 10</strong> — no additional permission needed.<ul><li><strong>Microphone</strong> — to hear you</li><li><strong>Screen recording</strong> — works automatically on Windows 10</li></ul><span class="ob-fine">You can also do this later in Windows Settings.</span>';
     }
 
     smartBtn.classList.toggle('on', !!settings.smart);
-    showExample();
+    // Nothing can answer yet → the "Sign in with publik" prompt instead of the
+    // example conversation.
+    if (!renderSetupCta()) showExample();
     syncPlaceholder();
-    updateHistoryBadge(); // FIX #3: Initialize badge on boot
     updateSendButtonState(); // Initialize send button state
 
     // Fix placeholder shortcut hint to match platform
     if (isWindows) {
-      placeholder.innerHTML = 'Ask about your screen or conversation, or <span class="keycap">Ctrl</span><span class="keycap">⏎</span> for Assist';
+      placeholder.innerHTML = 'Ask about your screen or conversation, or <span class="keycap">Ctrl</span><span class="keycap">⇧</span><span class="keycap">⏎</span> for Smart assist';
     }
+
+    applyOpacity(settings.opacity, false);
 
     const st = await cue.captureState();
     $('#live-dot').classList.toggle('off', !st.active);
-    $('#stop-btn').classList.toggle('active', st.active);
+    setSessionButton(st.active);
     if (!settings.onboarded) showOnboard();
   })();
 })();

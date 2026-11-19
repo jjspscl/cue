@@ -4,7 +4,7 @@
 
 **An open-source AI copilot that floats over your screen — sees what you see, hears your meetings, and stays hidden from screen shares.**
 
-A free, self-hosted alternative to Cluely. Bring your own AI key (OpenAI · Anthropic · Google Gemini · OpenAI-compatible endpoints).
+A free, self-hosted alternative to Cluely. Bring your own AI key (OpenAI · Anthropic · Google Gemini · Azure AI Foundry . OpenAI-compatible endpoints).
 
 <img src="docs/tutorial.png" width="620" alt="cue first-run tutorial" />
 
@@ -23,9 +23,8 @@ cue floats a small glass panel on top of everything. It takes **three separate i
 
 | Feature | How to trigger | What it uses |
 |---|---|---|
-| **Assist** | `⌘` `↵` (macOS) or `Ctrl` `Enter` (Windows), configurable | your screen + recent conversation |
-| **What should I say?** | button | meeting audio + your mic |
-| **Follow-up questions** | button | the whole conversation |
+| **Smart assist** | `⌘` `⇧` `↵` (macOS) or `Ctrl` `Shift` `Enter` (Windows) | your screen + recent conversation |
+| **What should I say?** | `⌘` `↵` (macOS) or `Ctrl` `Enter` (Windows) | meeting audio + your mic |
 | **Recap** | button | the whole conversation |
 | **Ask anything** | type + `↵` | your screen + conversation |
 | **Solve a coding problem** | `⌘` `H` (macOS) or `Ctrl` `H` (Windows) | your screen only |
@@ -44,7 +43,7 @@ It's a copilot for **live meetings** ("what do I say to that?") and **coding pro
 | Permissions to grant | Microphone **and** Screen Recording | Microphone only |
 
 > [!NOTE]
-> **Meeting audio needs macOS 14.4+.** Capturing the *other* person — what powers **What should I say?**, **Follow-up questions**, and **Recap** — uses system-audio loopback. On Windows that works out of the box. On macOS it relies on ScreenCaptureKit, which cue enables through Chromium's `MacLoopbackAudioForScreenShare` and `MacSckSystemAudioLoopbackOverride` switches; on older macOS the *Them* channel stays silent while your screen and the **You** channel keep working.
+> **Meeting audio needs macOS 14.4+.** Capturing the *other* person — what powers **What should I say?** and **Recap** — uses system-audio loopback. On Windows that works out of the box. On macOS it relies on ScreenCaptureKit, which cue enables through Chromium's `MacLoopbackAudioForScreenShare` and `MacSckSystemAudioLoopbackOverride` switches; on older macOS the *Them* channel stays silent while your screen and the **You** channel keep working.
 
 ---
 
@@ -57,7 +56,8 @@ Option A is the easiest on both platforms. Use Option B if you'd rather run from
 Go to the [**Releases**](../../releases) page, then choose your platform:
 
 - **Windows 10/11 (x64):** download **`cue-win-x64.exe`**, run it, and launch cue from the Start menu. The installer is unsigned, so Windows SmartScreen may show an **Unknown publisher** warning.
-- **macOS (Apple silicon):** download **`cue-…-arm64-mac.zip`**, unzip it, drag **`cue.app`** into **Applications**, and open it.
+- **macOS (Apple Silicon):** download **`cue-…-mac-arm64.zip`**, unzip it, drag **`cue.app`** into **Applications**, and open it.
+- **macOS (Intel):** download **`cue-…-mac-x64.zip`**, unzip it, drag **`cue.app`** into **Applications**, and open it.
 
 ### Option B — Run from source (macOS or Windows)
 
@@ -101,7 +101,7 @@ Windows x64 and Linux x64/arm64 use checksum-verified binaries from the pinned u
 
 ## First launch — the 1-minute setup
 
-When cue opens the first time, a **built-in tutorial** walks you through everything below. You can reopen it anytime by clicking the **cue logo** (top-left of the pill). Here's the same thing in writing.
+When cue opens the first time, a **built-in tutorial** walks you through everything below. You can reopen it anytime by clicking the **help** icon (top-left of the pill). Here's the same thing in writing.
 
 ### Step 1 — Grant permissions
 
@@ -111,16 +111,45 @@ cue can't help until your OS lets it see and hear. When you first use a feature 
 
 **On Windows — one grant.** Only the microphone needs permission: Settings → **Privacy & security** → **Microphone** → turn on **Microphone access** *and* **Let desktop apps access your microphone**. Screenshots and meeting audio need no permission at all — they work immediately, using Windows loopback capture.
 
-### Step 2 — Add your AI key (bring your own)
+### Step 2 — Sign in with publik, then pick how cue answers
+
+The packaged builds from the Releases page open with one small window:
+**Sign in with publik**. Click the button and sign in in your browser. The
+window continues by itself. Then it asks how to pay for AI. **Get a plan** or
+**Connect your plan** runs cue on **publik API** with no key of your own.
+**Use my own key** keeps cue on any of the providers below; add the key in
+Settings. You can change the answer at any time: Settings → Keys has
+**Sign in with publik** and **Use my own key**. cue never replaces a key you
+have already entered. Every request on publik API costs 50% of the model's
+published list price, from your publik plan or balance. Your prompts and
+screenshots go through publik's servers to a shared model account, and publik
+never trains on them.
+
+The sign-in is the one way into cue: closing the window quits cue. A build
+from source needs a publik app token: export `PUBLIK_APP_TOKEN`. The release
+workflow embeds the token from the `PUBLIK_APP_TOKEN` repository secret into
+`src/publik-build.json` (it is a publishable identifier that lets publik
+attribute installs to cue — it holds no balance and is not a key). For
+development, `PUBLIK_API_KEY` in the environment uses that key and skips the
+mint. This computer's publik key lives in
+`~/Library/Application Support/publik/apps/cue.json` (macOS),
+`%LOCALAPPDATA%\publik\apps\cue.json` (Windows) or
+`~/.config/publik/apps/cue.json` (Linux), shared with other publik apps on
+the computer. The renderer never sees it.
+
+### Step 2 (alternative) — Add your AI key (bring your own)
 
 cue uses **your own** API key, so it's free to run (you only pay your AI provider for what you use). Click the **`...`** button in the input box (or press `⌘` `,` on macOS / `Ctrl` `,` on Windows) to open **Settings**, pick a provider, and paste your key:
 
 | Provider | Get a key | Notes |
 |---|---|---|
+| **Cerebras** | [cloud.cerebras.ai](https://cloud.cerebras.ai) | Fast OpenAI-compatible chat at `https://api.cerebras.ai/v1`. No speech-to-text — add an OpenAI, Gemini, or Deepgram key for listening. |
 | **OpenAI** | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | One key does everything — **but** for the *listening* features the key must have **Whisper / audio** access (a "restricted" project key that only allows chat will give a 403 on transcription). |
 | **Anthropic (Claude)** | [console.anthropic.com](https://console.anthropic.com) | Great for screen & coding help. Claude has no speech-to-text, so add an OpenAI or Gemini key too if you want the listening features. |
 | **Google Gemini** | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | One key does chat + transcription. |
 | **Azure AI Foundry** | [ai.azure.com](https://ai.azure.com) | Paste your **endpoint** plus your key in Settings. **Azure OpenAI:** `https://&lt;resource&gt;.openai.azure.com/openai` — **AI Foundry:** `https://&lt;host&gt;.cognitiveservices.azure.com` (cue appends `/openai/v1` itself). The **model** fields are your deployment names. No speech-to-text — add an OpenAI or Gemini key for listening. |
+| **DeepSeek** | [platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys) | OpenAI-compatible chat API. No speech-to-text — add an OpenAI or Gemini key too if you want the listening features. |
+| **Groq** | [console.groq.com](https://console.groq.com) | Fast OpenAI-compatible chat. Groq Whisper can also handle transcription if you pick Groq on the Audio tab. |
 | **Custom** | Your endpoint or gateway | Any OpenAI-compatible Chat Completions endpoint. The API key is optional for unauthenticated local servers. |
 
 To use an OpenAI-compatible endpoint, select **Custom** and configure its Base URL, API key, and Fast/Smart model IDs. Custom endpoints handle LLM requests only; listening continues to use Deepgram, OpenAI, or Gemini credentials.
@@ -130,7 +159,7 @@ To use an OpenAI-compatible endpoint, select **Custom** and configure its Base U
 | OpenClaw local gateway | `http://127.0.0.1:18789/v1` | `openclaw/default` |
 | Ollama | `http://127.0.0.1:11434/v1` | An installed Ollama model ID |
 
-Your key is stored **only on your computer** (in `cue-data.json`) and is sent **only** to that provider. cue has no server and collects nothing.
+Your key is stored **only on your computer** (in `cue-data.json`) and is sent **only** to that provider. cue has no server of its own; the one thing it reports is the anonymous usage count described under [Privacy](#privacy).
 
 ### Optional — transcribe locally with whisper.cpp
 
@@ -142,6 +171,14 @@ Local mode is independent from the chat provider, so you can use local speech-to
 - Model files are downloaded only when you ask, support cancel/resume, and are checked against pinned byte counts and SHA-256 hashes.
 - Local mode never silently sends audio to a cloud fallback. A local failure is reported without sending the audio elsewhere.
 - Models are stored under Cue's Electron user-data directory and can be imported or deleted from Settings.
+
+### Optional — word-by-word transcription with only a Gemini key
+
+Deepgram and OpenAI keys stream transcripts word by word automatically. A Gemini key transcribes sentence by sentence unless you pick **Gemini** explicitly under **Settings → Audio**, which switches it to the `gemini-3.5-transcribe-live` streaming model (its running hypothesis gets revised as you speak, which some people find jumpy — that's why it's opt-in).
+
+### Meeting memory
+
+cue keeps what it hears. Every transcript turn is saved to `meetings.json` in cue's data folder as it lands, so a crash or a quit mid-meeting loses nothing: relaunch within 30 minutes and the transcript is restored to the sidebar and **Recap** / **Follow-up questions** carry on from where the conversation was. When you stop listening, cue writes notes for the meeting with your chat model — summary, key points, decisions, action items, follow-ups — and the summaries of your last three meetings are given to the model as background for later conversations (the live transcript always takes priority). A 30-minute silence, the clear-transcript button, or a stale meeting at launch closes the meeting. The newest 50 meetings are kept; nothing leaves your computer except the transcript sent to your chosen provider to write the notes.
 
 ### Optional — tailor answers to your background
 
@@ -163,9 +200,10 @@ cue is hidden from most screen-share tools automatically — **Google Meet, Micr
 
 > On Windows, press **`Ctrl`** wherever **`⌘`** appears below. cue's own UI relabels the keys to match your OS.
 
-- **`⌘` `↵` — Assist.** The do-the-smart-thing key. On a coding problem it solves it; in a conversation it tells you what to say. Works from anywhere. Change it under **Settings → Keyboard shortcuts**.
+- **`⌘` `↵` — What should I say?** Suggests what to say next from the conversation. Works from anywhere.
+- **`⌘` `⇧` `↵` — Smart assist.** The do-the-smart-thing key. On a coding problem it solves it; in a conversation it tells you what to say. Works from anywhere.
 - **`⌘` `H` — Solve what's on screen.** Screenshots a coding problem and returns the approach, code, and time/space complexity.
-- **The `▢` button** (top bar) — start/stop **listening** to a meeting. The green dot means it's live.
+- **Start session / End session** (top bar) — start or stop **listening** to a meeting. The green dot means it's live.
 - **Type a question** in the box and press `↵` to ask about your screen or conversation.
 - **Smart** — flip it on for a smarter, more thorough model; off for fast and cheap.
 - **Hide** collapses the panel to just the top bar. Drag cue around by the **top pill**. Quit with `⌘` `⇧` `X` on macOS or `Ctrl` `Shift` `X` on Windows.
@@ -219,7 +257,7 @@ Try `base.en`, `tiny.en`, or a quantized `q5`/`q8` model. Model size in Settings
 **"It says give access, but I already gave access."**
 You probably granted an older build. Because the app is ad-hoc signed, a rebuild changes its identity and macOS stops honoring the old grant (the checkmark can linger). Toggle cue **off and on** in System Settings → Screen Recording, or remove and re-add it.
 
-**"What should I say?", "Follow-up questions", or "Recap" never hear the other person (macOS).**
+**"What should I say?" or "Recap" never hear the other person (macOS).**
 Expected — meeting audio is Windows-only (see [Platform support](#platform-support)). Your own mic still transcribes, so those features see the *You* side of the conversation but never the *Them* side.
 
 **cue has no dock or taskbar icon — how do I quit it?**
@@ -247,13 +285,27 @@ Run `xattr -cr /Applications/cue.app` in Terminal once (see Install → Option A
 
 ## Privacy
 
-- No Cue accounts, hosted service, or telemetry. cue collects nothing.
+- No Cue accounts and no hosted Cue service. The only thing cue reports is the usage count below.
 - Your API keys live in a local file (`cue-data.json`) and are sent only to the provider you chose.
 - When Custom is selected, its API key and LLM request data are sent to the Base URL you configured.
 - Your optional résumé text also lives in `cue-data.json` and is sent with each model request to your selected AI provider. It is stored as plain text; clear it in Settings to remove it.
 - In Local transcription mode, microphone and meeting audio stay on your computer. In cloud transcription modes, audio is sent only to the selected speech provider.
 - Audio utterances and the current transcript stay in memory; Cue does not write captured audio to disk. Downloaded local model files remain on disk until you delete them.
 - Screenshots are sent to your selected chat provider only when a feature needs the screen.
+
+### Usage counts
+
+After the sign-in, cue sends two small events to publik: `app_opened` at each launch and `active_session` every 30 minutes while cue runs.
+Each event holds the app name (`cue`), the app version, the operating system, the CPU type and a random install ID. This computer's publik key goes with the event so publik can count the install once.
+No audio, transcript, screenshot, prompt, file name or own provider key is ever sent.
+To turn it off, set `DO_NOT_TRACK=1` in the environment before you start cue. Details: <https://publikhq.com/skills/telemetry.md>
+
+### Updates
+
+On macOS and Windows, cue checks publik's signed update feed (`https://publikhq.com/api/updates/cue/`) at launch, every 24 hours and from **Check for Updates…** at the bottom of Settings.
+It downloads an update in the background, verifies its signature and checksum, and asks you to restart. The check only downloads the feed file, in a session of its own: it sends no account, key, cookie or install ID.
+Set `PUBLIK_UPDATES=0` to turn off the automatic checks. Linux: download new versions from the Releases page.
+Details, the feed contract, releases, roll back and key rotation: [docs/updates.md](docs/updates.md).
 
 ## Contributing
 
