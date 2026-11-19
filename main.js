@@ -10,6 +10,7 @@ const { MODES } = require('./src/prompts');
 const { rms16 } = require('./src/wav');
 const { createStreamingSTT } = require('./src/stt-streaming');
 const { AdaptiveVAD, AudioRingBuffer } = require('./src/vad');
+const { createSessionStore } = require('./src/sessions');
 const { buildInterviewContext, detectCategory } = require('./src/interview-context');
 const { startAppLink, stopAppLink, recordEvent, appLinkConsentState, revokeAppLinkCaller } = require('./src/applink');
 
@@ -62,6 +63,8 @@ let flushTimer = null;
 let whisperModelManager = null;
 let localWhisperTranscriber = null;
 let activeWhisperModelId = null;
+let sessionStore = null; // saved Q&A sessions (see src/sessions.js)
+let currentSessionId = null; // null until the next answered question starts a session
 let desiredCaptureState = false;
 let captureTransition = Promise.resolve(false);
 
@@ -484,12 +487,24 @@ async function setCapturing(active) {
 }
 
 // -------- feature runner --------
+// Saves a finished question, its answer, and the screenshot Cue sent to the current session.
+// Failures are logged and never break the answer the user is already reading.
+function saveSessionTurn({ mode, question, answer, imageDataUrl }) {
+  if (!sessionStore || !answer.trim()) return;
+  try {
+    currentSessionId = sessionStore.appendTurn(currentSessionId, { mode, question, answer, imageDataUrl });
+  } catch (e) {
+    recordEvent({ level: 'error', event: 'session_save_failed', msg: e && e.message ? e.message : String(e), frame: 'saveSessionTurn', context: { mode } });
+  }
+}
+
 async function runFeature(mode, userText) {
   if (state.busy) return;
   const def = MODES[mode];
   if (!def) return;
   state.busy = true;
   let streamSettled = false; // drop stray tokens from a stream we've already abandoned
+  let answer = ''; // full streamed reply, saved to the session once it completes
   try {
     const settings = store.getSettings();
     const llm = createLLM(settings);
@@ -544,7 +559,7 @@ async function runFeature(mode, userText) {
           system,
           turns: [{ role: 'user', text: built }],
           imageDataUrl,
-          onToken: (t) => { if (streamSettled) return; rearm(); send('llm:token', { text: t }); }
+          onToken: (t) => { if (streamSettled) return; rearm(); answer += t; send('llm:token', { text: t }); }
         }),
         stalled
       ]);
@@ -553,6 +568,7 @@ async function runFeature(mode, userText) {
       clearTimeout(watchdog);
     }
     send('llm:done', {});
+    saveSessionTurn({ mode, question: userText || userBubble || '', answer, imageDataUrl });
   } catch (e) {
     recordEvent({ level: 'error', event: 'llm_failed', msg: e && e.message ? e.message : String(e), frame: 'runFeature', context: { mode, provider: store.getSettings().provider } });
     send('llm:error', { message: e && e.message ? e.message : String(e) });
@@ -621,6 +637,22 @@ ipcMain.handle('platform:info', () => ({
 ipcMain.handle('transcript:clear', () => {
   transcript.splice(0, transcript.length);
   return { ok: true };
+});
+ipcMain.handle('sessions:list', () => ({
+  currentId: currentSessionId,
+  sessions: sessionStore ? sessionStore.list() : []
+}));
+ipcMain.handle('sessions:get', (_e, id) => (sessionStore ? sessionStore.get(id) : null));
+ipcMain.handle('sessions:image', (_e, { id, turnId }) => (sessionStore ? sessionStore.imageDataUrl(id, turnId) : null));
+// Clears the current session so the next answered question starts a new one.
+ipcMain.handle('sessions:new', () => {
+  currentSessionId = null;
+  return { ok: true };
+});
+ipcMain.handle('sessions:delete', (_e, id) => {
+  if (!sessionStore) throw new Error('Session history is not ready yet.');
+  if (id === currentSessionId) currentSessionId = null;
+  return sessionStore.remove(id);
 });
 ipcMain.on('ask', (_e, payload) => runFeature(payload.mode, payload.text));
 ipcMain.on('mic:pcm', (_e, arrayBuffer) => { if (state.capturing) routeAudio('you', arrayBuffer); });
@@ -766,6 +798,7 @@ function launchApp() {
   if (isMac && app.dock) app.dock.hide();
 
   whisperModelManager = new WhisperModelManager({ userDataPath: app.getPath('userData') });
+  sessionStore = createSessionStore({ dir: path.join(app.getPath('userData'), 'sessions') });
 
   const allowMedia = (permission) => permission === 'media' || permission === 'microphone' || permission === 'audioCapture' || permission === 'display-capture' || permission === 'screen';
   session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => cb(allowMedia(permission)));

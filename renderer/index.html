@@ -62,6 +62,7 @@
               <div id="composer-bottom">
                 <button id="smart-toggle" class="smart-pill"><span class="ic"></span><span>Smart</span></button>
                 <button id="history-btn" class="history-btn" title="View conversation history"><span class="ic"></span></button>
+                <button id="sessions-btn" class="history-btn" title="Saved sessions"><span class="ic"></span></button>
                 <button id="more-btn" class="more-btn" title="Settings"></button>
                 <div class="spacer"></div>
                 <button id="send-btn" title="Send"></button>
@@ -92,6 +93,17 @@
       <div class="ts-footer">
         <button class="ts-clear-btn" id="clear-transcript-btn" title="Clear all history">Clear History</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Saved sessions menu — opened from the sessions button -->
+  <div id="sessions-scrim" class="hidden">
+    <div id="sessions" class="glass">
+      <div class="s-head">
+        <span class="s-title" id="sessions-title">Sessions</span>
+        <button class="s-close" id="sessions-close">Close</button>
+      </div>
+      <div id="sessions-body" class="sessions-body"></div>
     </div>
   </div>
 

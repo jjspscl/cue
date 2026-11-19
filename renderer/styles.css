@@ -52,7 +52,7 @@ html, body {
   padding-top: 14px;
   pointer-events: none;                  /* only the actual UI blocks; gaps pass through */
 }
-#toolbar, #panel-wrap, #settings-scrim, #onboard-scrim, #consent-scrim { pointer-events: auto; }
+#toolbar, #panel-wrap, #sessions-scrim, #settings-scrim, #onboard-scrim, #consent-scrim { pointer-events: auto; }
 #toolbar { -webkit-app-region: drag; }   /* drag the top pill to move the window */
 #panel-wrap, #panel, #messages, #action-row, #composer, #input, textarea, button, .act, .smart-pill, .more-btn, #send-btn, .s-close, .s-seg button, .ob-buttons button, .ob-ghost, .ob-primary { -webkit-app-region: no-drag; }
 
@@ -473,6 +473,33 @@ button:focus { outline: none; }
 .s-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; flex-shrink: 0; }
 .s-title { font-size: 17px; font-weight: 600; color: var(--tx-1); }
 .s-close { border: none; background: var(--accent); color: #fff; font-weight: 600; font-size: 13px; padding: 6px 14px; border-radius: var(--r-pill); cursor: pointer; }
+
+/* ============================ Sessions menu ============================ */
+#sessions-scrim {
+  position: fixed; inset: 0; z-index: 20;
+  display: grid; place-items: center;
+  background: rgba(0,0,0,0.35); backdrop-filter: blur(4px);
+}
+#sessions-scrim.hidden { display: none; }
+#sessions { width: min(560px, 94vw); padding: 18px 20px 20px; -webkit-app-region: no-drag; max-height: 88vh; display: flex; flex-direction: column; }
+.sessions-body { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 0; }
+.sess-actions { display: flex; gap: 8px; margin-bottom: 4px; }
+.sess-btn { border: none; background: rgba(255,255,255,0.08); color: var(--tx-1); font-size: 12px; padding: 6px 12px; border-radius: var(--r-pill); cursor: pointer; }
+.sess-btn:hover { background: rgba(255,255,255,0.14); }
+.sess-btn.primary { background: var(--accent); color: #fff; font-weight: 600; }
+.sess-btn.danger:hover { background: rgba(255,80,80,0.25); }
+.sess-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.05); cursor: pointer; }
+.sess-row:hover { background: rgba(255,255,255,0.1); }
+.sess-row.current { box-shadow: inset 2px 0 0 var(--accent); }
+.sess-row-title { font-size: 13px; color: var(--tx-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-row-meta { font-size: 11px; color: rgba(255,255,255,0.5); margin-top: 2px; }
+.sess-empty { font-size: 13px; color: rgba(255,255,255,0.5); padding: 12px 4px; }
+.sess-turn { padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.05); display: flex; flex-direction: column; gap: 6px; }
+.sess-q { font-size: 13px; font-weight: 600; color: var(--tx-1); white-space: pre-wrap; }
+.sess-a { font-size: 13px; color: var(--tx-1); white-space: pre-wrap; line-height: 1.45; }
+.sess-shot { max-width: 100%; border-radius: 8px; cursor: zoom-in; border: 1px solid rgba(255,255,255,0.1); }
+.sess-time { font-size: 11px; color: rgba(255,255,255,0.45); }
+
 
 /* Tab bar */
 .s-tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-shrink: 0; overflow-x: auto; }

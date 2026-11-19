@@ -1236,6 +1236,95 @@
   $('#s-close').addEventListener('click', () => { void closeSettings(); });
   scrim.addEventListener('click', (e) => { if (e.target === scrim) void closeSettings(); });
 
+  // ---- saved sessions ----------------------------------------------------
+  const sessionsScrim = $('#sessions-scrim');
+  const sessionsBody = $('#sessions-body');
+  const sessionsTitle = $('#sessions-title');
+
+  function makeEl(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+  function sessionTime(ts) {
+    return new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  async function renderSessionList() {
+    sessionsTitle.textContent = 'Sessions';
+    const { currentId, sessions } = await cue.sessionsList();
+    sessionsBody.replaceChildren();
+
+    const actions = makeEl('div', 'sess-actions');
+    const newBtn = makeEl('button', 'sess-btn primary', 'New session');
+    newBtn.addEventListener('click', async () => {
+      await cue.sessionNew();
+      showToast('Started a new session', 2500);
+      renderSessionList();
+    });
+    actions.appendChild(newBtn);
+    sessionsBody.appendChild(actions);
+
+    if (!sessions.length) {
+      sessionsBody.appendChild(makeEl('div', 'sess-empty', 'No saved sessions yet. Ask a question and it will be saved here.'));
+      return;
+    }
+    for (const s of sessions) {
+      const row = makeEl('div', 'sess-row' + (s.id === currentId ? ' current' : ''));
+      const info = makeEl('div');
+      info.style.minWidth = '0';
+      info.appendChild(makeEl('div', 'sess-row-title', s.title));
+      const count = s.turnCount === 1 ? '1 question' : `${s.turnCount} questions`;
+      info.appendChild(makeEl('div', 'sess-row-meta', `${count} · ${sessionTime(s.updatedAt)}${s.id === currentId ? ' · current' : ''}`));
+      row.appendChild(info);
+
+      const del = makeEl('button', 'sess-btn danger', 'Delete');
+      del.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!confirm('Delete this session and its screenshots?')) return;
+        await cue.sessionDelete(s.id);
+        renderSessionList();
+      });
+      row.appendChild(del);
+      row.addEventListener('click', () => renderSessionDetail(s.id));
+      sessionsBody.appendChild(row);
+    }
+  }
+
+  async function renderSessionDetail(id) {
+    const session = await cue.sessionGet(id);
+    if (!session) { renderSessionList(); return; }
+    sessionsTitle.textContent = session.title;
+    sessionsBody.replaceChildren();
+
+    const back = makeEl('button', 'sess-btn', '← All sessions');
+    back.addEventListener('click', renderSessionList);
+    sessionsBody.appendChild(back);
+
+    for (const turn of session.turns) {
+      const box = makeEl('div', 'sess-turn');
+      box.appendChild(makeEl('div', 'sess-time', sessionTime(turn.at)));
+      if (turn.question) box.appendChild(makeEl('div', 'sess-q', turn.question));
+      if (turn.image) {
+        const img = makeEl('img', 'sess-shot');
+        img.alt = 'Screenshot from this question';
+        cue.sessionImage(id, turn.id).then((url) => { if (url) img.src = url; else img.remove(); });
+        box.appendChild(img);
+      }
+      box.appendChild(makeEl('div', 'sess-a', turn.answer));
+      sessionsBody.appendChild(box);
+    }
+  }
+
+  function openSessions() { sessionsScrim.classList.remove('hidden'); renderSessionList(); }
+  function closeSessions() { sessionsScrim.classList.add('hidden'); }
+  const sessionsBtn = $('#sessions-btn');
+  sessionsBtn.innerHTML = icon('message-circle', { size: 15 });
+  sessionsBtn.addEventListener('click', openSessions);
+  $('#sessions-close').addEventListener('click', closeSessions);
+  sessionsScrim.addEventListener('click', (e) => { if (e.target === sessionsScrim) closeSessions(); });
+
   // Tab switching
   document.querySelectorAll('.s-tab').forEach((tab) => {
     tab.addEventListener('click', async () => {
@@ -1598,7 +1687,7 @@
   function setIgnore(v) { if (v !== ignoring) { ignoring = v; cue.setIgnoreMouse(v); } }
   document.addEventListener('mousemove', (e) => {
     const el = document.elementFromPoint(e.clientX, e.clientY);
-    const overUI = !!(el && el.closest && el.closest('#toolbar, #panel-wrap, #transcript-sidebar, #settings-scrim, #onboard-scrim, #consent-scrim'));
+    const overUI = !!(el && el.closest && el.closest('#toolbar, #panel-wrap, #transcript-sidebar, #sessions-scrim, #settings-scrim, #onboard-scrim, #consent-scrim'));
     setIgnore(!overUI);
   });
   setIgnore(true); // start fully click-through; hovering the panel re-enables it
